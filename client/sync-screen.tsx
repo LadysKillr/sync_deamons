@@ -1,7 +1,7 @@
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { DEFAULT_CONFIG_PATHS, type FileSet, type GroupMode, type GroupScope } from "../shared/model";
+import { DEFAULT_CONFIG_PATHS, FILE_PRESETS, JSON_PRESETS, type FileSet, type GroupMode, type GroupScope, type JsonKey } from "../shared/model";
 import {
   groupCreateRpc,
   groupRemoveRpc,
@@ -17,6 +17,7 @@ import {
   type StatusView,
 } from "../shared/rpc";
 import { MachineStatusPanel } from "./machine-status";
+import { AwaitingPanel, ConflictsPanel, LocalPanel, PasswordPanel, UpdatesPanel } from "./panels";
 import { Button, Chip, Field, Section, Toggle, ago, useStyles, type Styles } from "./ui";
 
 const MODES: Array<{ id: GroupMode; label: string; hint: string }> = [
@@ -136,7 +137,9 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
         {node.label} · <Text style={s.mono}>{node.effectiveUrl}</Text>
       </Text>
       <Text style={node.listening ? s.success : s.danger}>
-        {node.listening ? `À l'écoute sur ${node.listenHost}:${node.port}` : `Pas à l'écoute : ${node.listenError ?? "démarrage…"}`}
+        {node.listening
+          ? `À l'écoute sur ${node.boundHost ?? node.listenHost}:${node.port}${node.listenHost === "auto" ? (node.boundHost === "0.0.0.0" ? " (pas de Tailscale : toutes les interfaces)" : " (Tailscale)") : ""}`
+          : `Pas à l'écoute : ${node.listenError ?? "démarrage…"}`}
       </Text>
       <Text style={s.muted}>
         {node.watch
@@ -148,7 +151,7 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
         <View style={{ gap: 10 }}>
           <View style={s.row}>
             <Field s={s} label="Nom de la machine" value={label} onChange={setLabel} />
-            <Field s={s} label="Écoute (adresse)" value={listenHost} onChange={setListenHost} hint="0.0.0.0 = toutes les interfaces" />
+            <Field s={s} label="Écoute (adresse)" value={listenHost} onChange={setListenHost} hint="auto = Tailscale s'il y en a un ; 0.0.0.0 = toutes les interfaces" />
             <Field s={s} label="Port" value={port} onChange={setPort} />
           </View>
           <View style={s.row}>
@@ -189,7 +192,8 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
   const remove = useRpc(groupRemoveRpc);
   const syncNow = useRpc(syncNowRpc);
   const invite = useRpc(inviteRpc);
-  const [panel, setPanel] = useState<"none" | "scope" | "peers" | "invite">("none");
+  const [panel, setPanel] = useState<"none" | "scope" | "peers" | "invite" | "local" | "password">("none");
+  const closeAndRefresh = () => (setPanel("none"), onChanged());
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const action = useAction(onChanged);
@@ -209,7 +213,15 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
         {MODES.find((mode) => mode.id === group.mode)?.label} · {group.items} éléments · dernier passage {ago(group.lastSyncAt)}
         {group.pending > 0 ? ` · ${group.pending} en attente` : ""}
       </Text>
-      {group.lastError ? <Text style={s.warning}>{group.lastError}</Text> : null}
+      {group.revokedBy ? <Text style={s.danger}>Cette machine a été retirée de ce groupe par {group.revokedBy}. Quittez le groupe ou rejoignez-le avec le nouveau mot de passe.</Text> : null}
+      {group.lastError && !group.revokedBy ? <Text style={s.warning}>{group.lastError}</Text> : null}
+      {group.exclude.length > 0 || group.approval ? (
+        <Text style={s.muted}>
+          Ici : {group.exclude.length > 0 ? `${group.exclude.length} exclusion(s)` : ""}
+          {group.exclude.length > 0 && group.approval ? " · " : ""}
+          {group.approval ? "mode approbation" : ""}
+        </Text>
+      ) : null}
 
       <View style={{ gap: 4 }}>
         {group.members.map((member) => {
@@ -225,7 +237,10 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
         })}
       </View>
 
-      <MachineStatusPanel s={s} group={group} />
+      <MachineStatusPanel s={s} group={group} onChanged={onChanged} />
+      <AwaitingPanel s={s} group={group} onChanged={onChanged} />
+      <ConflictsPanel s={s} group={group} onChanged={onChanged} />
+      <UpdatesPanel s={s} group={group} onChanged={onChanged} />
 
       {group.problems.length > 0 ? (
         <View style={{ gap: 2 }}>
@@ -254,7 +269,9 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
       <View style={s.row}>
         <Button s={s} kind="primary" label="Synchroniser" disabled={action.busy} onPress={() => action.run(() => syncNow({ id: group.id }))} />
         <Button s={s} label="Ce qui est synchronisé" onPress={() => setPanel(panel === "scope" ? "none" : "scope")} />
+        <Button s={s} label="Cette machine" onPress={() => setPanel(panel === "local" ? "none" : "local")} />
         <Button s={s} label="Machines" onPress={() => setPanel(panel === "peers" ? "none" : "peers")} />
+        <Button s={s} label="Mot de passe" onPress={() => setPanel(panel === "password" ? "none" : "password")} />
         <Button
           s={s}
           label="Inviter"
@@ -275,7 +292,9 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
       {action.error ? <Text style={s.danger}>{action.error}</Text> : null}
 
       {panel === "scope" ? <ScopeEditor s={s} group={group} plugins={props.plugins} onSaved={() => (setPanel("none"), onChanged())} /> : null}
-      {panel === "peers" ? <PeersEditor s={s} group={group} onSaved={() => (setPanel("none"), onChanged())} /> : null}
+      {panel === "peers" ? <PeersEditor s={s} group={group} onSaved={closeAndRefresh} /> : null}
+      {panel === "local" ? <LocalPanel s={s} group={group} onSaved={closeAndRefresh} /> : null}
+      {panel === "password" ? <PasswordPanel s={s} group={group} onSaved={onChanged} /> : null}
       {panel === "invite" ? (
         <View style={{ gap: 6 }}>
           <Text style={s.muted}>
@@ -301,11 +320,33 @@ function parseFileSets(text: string): FileSet[] {
     });
 }
 
+function parseJsonKeys(text: string): JsonKey[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [id = "", ...rest] = line.split("=");
+      const value = rest.join("=");
+      const colon = value.lastIndexOf(":");
+      return { id: id.trim(), file: (colon >= 0 ? value.slice(0, colon) : value).trim(), path: (colon >= 0 ? value.slice(colon + 1) : "").trim() };
+    });
+}
+
+/** Ajoute ou retire une ligne « id = … » d'un texte d'une ligne par élément. */
+function toggleLine(text: string, id: string, line: string): string {
+  const lines = text.split("\n").map((item) => item.trim()).filter(Boolean);
+  const has = lines.some((item) => item.split("=")[0]!.trim() === id);
+  return (has ? lines.filter((item) => item.split("=")[0]!.trim() !== id) : [...lines, line]).join("\n");
+}
+const hasLine = (text: string, id: string) => text.split("\n").some((item) => item.split("=")[0]!.trim() === id);
+
 function ScopeEditor({ s, group, plugins, onSaved }: { s: Styles; group: GroupView; plugins: LocalPlugin[]; onSaved(): void }) {
   const update = useRpc(groupUpdateRpc);
   const [scope, setScope] = useState<GroupScope>(group.scope);
   const [configPaths, setConfigPaths] = useState(group.scope.config.paths.join(", "));
   const [fileSets, setFileSets] = useState(group.scope.files.sets.map((set) => `${set.id} = ${set.path}`).join("\n"));
+  const [jsonKeys, setJsonKeys] = useState(group.scope.json.entries.map((entry) => `${entry.id} = ${entry.file} : ${entry.path}`).join("\n"));
   const action = useAction(onSaved);
   const patch = (next: Partial<GroupScope>) => setScope({ ...scope, ...next });
   const ids = new Set(scope.plugins.ids);
@@ -375,8 +416,47 @@ function ScopeEditor({ s, group, plugins, onSaved }: { s: Styles; group: GroupVi
             placeholder={"claude-skills = ~/.claude/skills\nclaude-md = ~/.claude/CLAUDE.md"}
             hint="~ = dossier personnel de chaque machine. .git et node_modules sont ignorés ; 4 Mo par fichier au plus."
           />
+          <Text style={s.muted}>Préréglages :</Text>
+          <View style={s.row}>
+            {FILE_PRESETS.map((preset) => (
+              <Chip key={preset.id} s={s} label={preset.label} active={hasLine(fileSets, preset.id)} onPress={() => setFileSets(toggleLine(fileSets, preset.id, `${preset.id} = ${preset.path}`))} />
+            ))}
+          </View>
         </View>
       ) : null}
+      <Toggle s={s} label="Clés de fichiers JSON (serveurs MCP, permissions…)" value={scope.json.enabled} onChange={(enabled) => patch({ json: { ...scope.json, enabled } })} />
+      {scope.json.enabled ? (
+        <View style={{ paddingLeft: 26, gap: 6 }}>
+          <Field
+            s={s}
+            multiline
+            label="Une clé par ligne : identifiant = fichier : chemin de la clé"
+            value={jsonKeys}
+            onChange={setJsonKeys}
+            placeholder="claude-mcp = ~/.claude.json : mcpServers"
+            hint="Seule la clé est partagée, le reste du fichier reste propre à chaque machine."
+          />
+          <View style={s.row}>
+            {JSON_PRESETS.map((preset) => (
+              <Chip key={preset.id} s={s} label={preset.label} active={hasLine(jsonKeys, preset.id)} onPress={() => setJsonKeys(toggleLine(jsonKeys, preset.id, `${preset.id} = ${preset.file} : ${preset.path}`))} />
+            ))}
+          </View>
+        </View>
+      ) : null}
+      <Toggle s={s} label="Planifications Paseo" value={scope.schedules.enabled} onChange={(enabled) => patch({ schedules: { enabled } })} />
+      {scope.schedules.enabled ? (
+        <Text style={[s.warning, { paddingLeft: 26 }]}>
+          Chaque machine du groupe exécutera ces planifications. Excluez-les (« Cette machine ») là où elles ne doivent pas tourner. Une
+          planification dont le dossier de travail manque sur une machine n'y est pas créée.
+        </Text>
+      ) : null}
+      <Toggle s={s} label="Mettre à jour Sync lui-même sur toutes les machines" value={scope.selfUpdate} onChange={(selfUpdate) => patch({ selfUpdate })} />
+      <Toggle
+        s={s}
+        label="Suivre les mises à jour des plugins (une machine vérifie toutes les 6 h et installe, le groupe suit)"
+        value={scope.autoUpdatePlugins}
+        onChange={(autoUpdatePlugins) => patch({ autoUpdatePlugins })}
+      />
       <Toggle s={s} label="Propager les suppressions" value={scope.propagateDeletions} onChange={(propagateDeletions) => patch({ propagateDeletions })} />
       {action.error ? <Text style={s.danger}>{action.error}</Text> : null}
       <View style={s.row}>
@@ -393,6 +473,7 @@ function ScopeEditor({ s, group, plugins, onSaved }: { s: Styles; group: GroupVi
                   ...scope,
                   config: { ...scope.config, paths: configPaths.split(",").map((path) => path.trim()).filter(Boolean) },
                   files: { ...scope.files, sets: parseFileSets(fileSets) },
+                  json: { ...scope.json, entries: parseJsonKeys(jsonKeys) },
                 },
               }),
             )

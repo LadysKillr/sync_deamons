@@ -1,19 +1,10 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { GroupView, ItemStatus } from "../shared/rpc";
+import { itemLabel } from "./labels";
 import { SYNC_VERSION } from "../shared/version";
+import { HistoryPanel } from "./panels";
 import type { Styles } from "./ui";
-
-/** Nom lisible d'un élément : « plugin/kanban » → « kanban », « file/skills » → « fichiers skills ». */
-export function itemLabel(item: Pick<ItemStatus, "key" | "count">): string {
-  const [kind = "", ...rest] = item.key.split("/");
-  const name = rest.join("/");
-  if (kind === "plugin") return name;
-  if (kind === "settings") return `réglages ${name}`;
-  if (kind === "config") return `config ${name}`;
-  if (kind === "file") return `fichiers ${name} (${item.count})`;
-  return item.key;
-}
 
 function machineState(s: Styles, machine: GroupView["machines"][number]): { text: string; style: object } {
   if (machine.version === null) return { text: "Sync trop ancien pour rendre compte (0.1.3 ou avant)", style: s.muted };
@@ -25,7 +16,7 @@ function machineState(s: Styles, machine: GroupView["machines"][number]): { text
 }
 
 /** Une ligne par machine, puis le détail par élément (plugins d'abord). */
-export function MachineStatusPanel({ s, group }: { s: Styles; group: GroupView }) {
+export function MachineStatusPanel({ s, group, onChanged }: { s: Styles; group: GroupView; onChanged(): void }) {
   const [detail, setDetail] = useState(false);
   const total = group.machines.length;
   const problems = group.itemStatus.filter((item) => item.errors.length > 0);
@@ -48,11 +39,11 @@ export function MachineStatusPanel({ s, group }: { s: Styles; group: GroupView }
       })}
       {plugins.length > 0 ? (
         <Text style={s.muted}>
-          Plugins installés partout : {plugins.filter((item) => item.ok.length + item.notApplied.length === total).length}/{plugins.length}
+          Plugins installés partout : {plugins.filter((item) => item.ok.length + item.notApplied.length + item.excluded.length === total).length}/{plugins.length}
         </Text>
       ) : null}
       {shown.map((item) => (
-        <ItemLine key={item.key} s={s} item={item} total={total} />
+        <ItemLine key={item.key} s={s} item={item} total={total} groupId={group.id} onChanged={onChanged} withHistory={detail} />
       ))}
       <Pressable accessibilityRole="button" onPress={() => setDetail(!detail)}>
         <Text style={[s.muted, { textDecorationLine: "underline" }]}>{detail ? "Masquer le détail par élément" : "Voir le détail par élément"}</Text>
@@ -61,22 +52,36 @@ export function MachineStatusPanel({ s, group }: { s: Styles; group: GroupView }
   );
 }
 
-function ItemLine({ s, item, total }: { s: Styles; item: ItemStatus; total: number }) {
-  const applying = total - item.notApplied.length;
+function ItemLine(props: { s: Styles; item: ItemStatus; total: number; groupId: string; onChanged(): void; withHistory: boolean }) {
+  const { s, item, total } = props;
+  const [history, setHistory] = useState(false);
+  const applying = total - item.notApplied.length - item.excluded.length;
   const done = item.ok.length === applying;
+  // Un ensemble de fichiers n'a pas d'historique d'ensemble (chaque fichier a le sien).
+  const canHistory = props.withHistory && !item.key.startsWith("file/");
   return (
     <View style={{ gap: 1 }}>
-      <Text style={s.text}>
-        <Text style={item.errors.length ? s.danger : done ? s.success : s.warning}>{item.errors.length ? "✗ " : done ? "✓ " : "… "}</Text>
-        {itemLabel(item)} <Text style={s.muted}>· {item.ok.length}/{applying}</Text>
-      </Text>
+      <View style={s.row}>
+        <Text style={s.text}>
+          <Text style={item.errors.length ? s.danger : done ? s.success : s.warning}>{item.errors.length ? "✗ " : done ? "✓ " : "… "}</Text>
+          {itemLabel(item)} <Text style={s.muted}>· {item.ok.length}/{applying}</Text>
+        </Text>
+        {canHistory ? (
+          <Pressable accessibilityRole="button" onPress={() => setHistory(!history)}>
+            <Text style={[s.muted, { textDecorationLine: "underline" }]}>{history ? "masquer l'historique" : "historique"}</Text>
+          </Pressable>
+        ) : null}
+      </View>
       {item.errors.map((error) => (
         <Text key={error.machine} style={[s.danger, { paddingLeft: 16 }]}>
           {error.machine} : {error.message}
         </Text>
       ))}
+      {item.awaiting.length ? <Text style={[s.warning, { paddingLeft: 16 }]}>attend un accord : {item.awaiting.join(", ")}</Text> : null}
       {item.pending.length ? <Text style={[s.warning, { paddingLeft: 16 }]}>en cours : {item.pending.join(", ")}</Text> : null}
+      {item.excluded.length ? <Text style={[s.muted, { paddingLeft: 16 }]}>exclu sur : {item.excluded.join(", ")}</Text> : null}
       {item.unknown.length ? <Text style={[s.muted, { paddingLeft: 16 }]}>état inconnu : {item.unknown.join(", ")}</Text> : null}
+      {history ? <HistoryPanel s={s} groupId={props.groupId} itemKey={item.key} onChanged={props.onChanged} /> : null}
     </View>
   );
 }
