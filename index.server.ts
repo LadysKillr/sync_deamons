@@ -33,7 +33,7 @@ import { CHECK_EVERY_MS, PluginUpdater, updateLeader, updatesFor } from "./serve
 import { Store, newGroupState } from "./server/store";
 import { ChangeWatcher, watchTargets } from "./server/watcher";
 import { expandHome } from "./server/collectors";
-import { guessAddress, sendRequest, startServer, type ListeningServer } from "./server/transport";
+import { guessAddress, resolveListenHost, sendRequest, startServer, type ListeningServer } from "./server/transport";
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -90,17 +90,21 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     handle: (groupId: string, request: Parameters<Engine["handleIncoming"]>[1]) => engine.handleIncoming(groupId, request),
   };
 
+  /** Adresse sur laquelle le serveur écoute vraiment (résolution de « auto »). */
+  let boundHost: string | null = null;
   async function listen(): Promise<void> {
     if (listening) await listening.close();
     listening = null;
-    const { listenHost, port } = store.data.node;
+    const { port } = store.data.node;
+    const host = resolveListenHost(store.data.node.listenHost);
+    boundHost = host;
     try {
-      listening = await startServer(listenHost, port, handler, log);
+      listening = await startServer(host, port, handler, log);
       listenError = null;
-      log(`à l'écoute sur ${listenHost}:${port}, annoncé comme ${selfUrl()}`);
+      log(`à l'écoute sur ${host}:${port}, annoncé comme ${selfUrl()}`);
     } catch (error) {
       listenError = describe(error);
-      log(`écoute impossible sur ${listenHost}:${port} : ${listenError}`);
+      log(`écoute impossible sur ${host}:${port} : ${listenError}`);
     }
   }
   void listen();
@@ -137,6 +141,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     effectiveUrl: selfUrl(),
     listening: listening !== null,
     listenError,
+    boundHost,
     watching: store.data.node.watch ? watching : 0,
   });
 
@@ -303,6 +308,8 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     // Passage de secours : membres revenus en ligne, nouvelles tentatives, événement manqué. Il repose aussi les
     // surveillances (portée reçue d'un autre membre, dossier créé entre-temps).
     timer = setInterval(() => {
+      // Tailscale arrivé (ou parti) après le démarrage de Sync : on se remet à l'écoute au bon endroit.
+      if (store.data.node.listenHost === "auto" && resolveListenHost("auto") !== boundHost) void listen();
       rewatch();
       runAll();
     }, store.data.node.intervalSec * 1000);

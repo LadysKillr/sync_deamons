@@ -12,6 +12,8 @@ export const NodeViewSchema = z.object({
   effectiveUrl: z.string(),
   listening: z.boolean(),
   listenError: z.string().nullable(),
+  /** Adresse d'écoute réelle (« auto » résolu). */
+  boundHost: z.string().nullable(),
   intervalSec: z.number(),
   watch: z.boolean(),
   watching: z.number(),

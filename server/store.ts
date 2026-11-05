@@ -106,7 +106,7 @@ export function defaultNode(): NodeConfig {
   return {
     nodeId: `n_${randomBytes(8).toString("hex")}`,
     label: hostname(),
-    listenHost: "0.0.0.0",
+    listenHost: "auto",
     port: DEFAULT_PORT,
     advertiseUrl: null,
     intervalSec: DEFAULT_INTERVAL_SEC,
@@ -148,6 +148,8 @@ export class Store {
     }
     const data = parsed.data as StoreFile;
     if (!data.node.identity) {
+      // Passage à 0.2.0 : l'ancien défaut (toutes les interfaces) devient « auto » (Tailscale s'il y en a un).
+      if (data.node.listenHost === "0.0.0.0") data.node.listenHost = "auto";
       data.node.identity = newIdentity();
       this.data = data;
       this.save();

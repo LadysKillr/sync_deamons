@@ -164,6 +164,23 @@ export async function sendRequest(url: string, keys: GroupKeys, request: SyncReq
   return parsed.data;
 }
 
+/** Adresse Tailscale de la machine (100.64.0.0/10), ou null. */
+export function tailscaleAddress(): string | null {
+  for (const list of Object.values(networkInterfaces())) {
+    for (const item of list ?? []) {
+      if (item.family !== "IPv4" || item.internal) continue;
+      const [a, b] = item.address.split(".").map(Number);
+      if (a === 100 && b !== undefined && b >= 64 && b <= 127) return item.address;
+    }
+  }
+  return null;
+}
+
+/** Adresse d'écoute réelle : `auto` = Tailscale s'il y en a un, sinon toutes les interfaces. */
+export function resolveListenHost(listenHost: string): string {
+  return listenHost === "auto" ? (tailscaleAddress() ?? "0.0.0.0") : listenHost;
+}
+
 /** Adresse annoncée par défaut : Tailscale (100.64.0.0/10) d'abord, puis la première IPv4 non locale. */
 export function guessAddress(): string {
   const addresses: string[] = [];
