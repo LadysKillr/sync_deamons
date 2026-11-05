@@ -37,7 +37,13 @@ export function concurrent(a: Entry, b: Entry): boolean {
 }
 export type Entries = Record<string, Entry>;
 
-export const MemberSchema = z.object({ label: z.string().max(120), url: z.string().max(500), seenAt: z.number().int().nonnegative() });
+export const MemberSchema = z.object({
+  label: z.string().max(120),
+  url: z.string().max(500),
+  seenAt: z.number().int().nonnegative(),
+  /** Clé publique X25519 de la machine (changement de mot de passe), absente avant 0.2.0. */
+  pub: z.string().max(64).optional(),
+});
 export type Member = z.infer<typeof MemberSchema>;
 export type Members = Record<string, Member>;
 

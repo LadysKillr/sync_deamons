@@ -16,6 +16,7 @@ import {
   inviteRpc,
   nodeUpdateRpc,
   pluginsListRpc,
+  rekeyRpc,
   restoreRpc,
   statusRpc,
   syncNowRpc,
@@ -81,8 +82,10 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
 
   const handler = {
     keysFor(groupId: string) {
-      const group = store.group(groupId);
-      return group && group.enabled ? engine.keys(group) : null;
+      const found = store.findGroup(groupId, Date.now());
+      if (!found || !found.group.enabled) return null;
+      // Ancienne clé d'un changement de mot de passe récent : seulement pour remettre l'avis.
+      return found.stale ? groupKeys(Buffer.from(found.group.previous!.key, "base64")) : engine.keys(found.group);
     },
     handle: (groupId: string, request: Parameters<Engine["handleIncoming"]>[1]) => engine.handleIncoming(groupId, request),
   };
@@ -213,6 +216,17 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     store.save();
     void engine.run(id);
     return { ok: true as const };
+  });
+
+  handle(rekeyRpc, async ({ id, password, remove }) => {
+    const group = requireGroup(id);
+    const master = await deriveMasterKey(password, group.name);
+    const { rekey, oldKeys, unreachable, notify } = engine.rekey(group, master, remove);
+    store.save();
+    const reached = await engine.announceRekey(group, rekey, oldKeys, notify);
+    store.save();
+    void engine.run(group.id);
+    return { id: group.id, reached, unreachable };
   });
 
   handle(groupRemoveRpc, async ({ id }) => {

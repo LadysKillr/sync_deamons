@@ -27,6 +27,7 @@ import { updateLeader } from "./plugin-updates";
 import type { GroupState, Store } from "./store";
 import { BLOBS_BYTES_PER_RESPONSE, BLOBS_PER_REQUEST, type SyncRequest, type SyncResponse } from "./transport";
 import { blobRef, type BlobStore } from "./blobs";
+import { REKEY_GRACE_MS, unwrap, wrapFor, type Rekey } from "./rekey";
 
 /**
  * Le moteur : pour chaque groupe, à chaque passage
@@ -512,7 +513,8 @@ export class Engine {
 
   private identity(group: GroupState) {
     const url = this.deps.selfUrl();
-    group.members[this.nodeId] = { label: this.store.data.node.label, url, seenAt: this.clock.now() };
+    const pub = this.store.data.node.identity?.x;
+    group.members[this.nodeId] = { label: this.store.data.node.label, url, seenAt: this.clock.now(), ...(pub ? { pub } : {}) };
     this.refreshReport(group);
     return {
       from: this.nodeId,
@@ -574,18 +576,34 @@ export class Engine {
     entries = this.admissible(group, entries);
     this.clock.observe(maxTime(entries));
     const changed = mergeEntries(group.entries, entries, (key, current, incoming, replaced) => this.compare(group, key, current, incoming, replaced));
-    mergeMembers(group.members, from.members);
+    mergeMembers(group.members, Object.fromEntries(Object.entries(from.members).filter(([nodeId]) => !group.revoked.includes(nodeId))));
     // Seule cette machine parle d'elle-même : un compte rendu à son nom venu d'ailleurs est ignoré.
     const { [this.nodeId]: _mine, ...others } = from.reports ?? {};
     mergeReports(group.reports, others);
-    if (from.from !== this.nodeId && validMemberUrl(from.url)) group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now() };
+    if (from.from !== this.nodeId && validMemberUrl(from.url) && !group.revoked.includes(from.from)) {
+      // La clé publique vient de la liste que la machine publie sur elle-même.
+      const pub = from.members[from.from]?.pub;
+      group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now(), ...(pub ? { pub } : {}) };
+    }
     return changed;
   }
 
   /** Requête entrante d'un membre. */
   async handleIncoming(groupId: string, request: SyncRequest): Promise<SyncResponse> {
-    const group = this.store.group(groupId);
-    if (!group || !group.enabled) throw new Error("groupe inactif");
+    const found = this.store.findGroup(groupId, this.clock.now());
+    if (!found || !found.group.enabled) throw new Error("groupe inactif");
+    const group = found.group;
+    if (found.stale) {
+      // Ancienne clé : on ne lit rien de cette machine, on lui remet seulement l'avis (ou on lui dit qu'elle est retirée).
+      const minimal = { from: this.nodeId, label: this.store.data.node.label, url: this.deps.selfUrl(), ts: this.clock.now(), members: {}, entries: {}, versions: {} };
+      if (group.revoked.includes(request.from)) return { ...minimal, revoked: true };
+      return group.rekey ? { ...minimal, rekey: group.rekey } : minimal;
+    }
+    if (request.type === "rekey") {
+      this.applyRekey(group, request.payload);
+      this.store.save();
+      return { from: this.nodeId, label: this.store.data.node.label, url: this.deps.selfUrl(), ts: this.clock.now(), members: {}, entries: {}, versions: {} };
+    }
     let changed: string[] = [];
     if (request.type === "push") {
       changed = this.absorb(group, request, request.entries);
@@ -604,6 +622,102 @@ export class Engine {
     this.store.save();
     if (changed.length > 0) this.trigger(group.id);
     return response;
+  }
+
+  private markRevoked(group: GroupState, by: string): void {
+    group.enabled = false;
+    group.revokedBy = by;
+    group.lastError = `Cette machine a été retirée du groupe (par ${by}).`;
+    this.deps.log(`groupe ${group.name} : ${group.lastError}`);
+  }
+
+  /** Bascule sur la nouvelle clé ; l'ancienne reste acceptée un temps, pour remettre l'avis aux retardataires. */
+  private switchKey(group: GroupState, master: Buffer, rekey: Rekey): void {
+    group.previous = { id: group.id, key: group.key, until: this.clock.now() + REKEY_GRACE_MS };
+    group.id = rekey.newId;
+    group.key = master.toString("base64");
+    group.rekey = rekey;
+    group.revoked = [...new Set([...group.revoked, ...rekey.removed])];
+    // Adresses des machines retirées (liste des membres et adresses de départ déjà reconnues) : plus contactées.
+    const removedUrls = new Set<string>();
+    for (const nodeId of rekey.removed) {
+      const url = group.members[nodeId]?.url;
+      if (url) removedUrls.add(url);
+      delete group.members[nodeId];
+      delete group.reports[nodeId];
+    }
+    for (const [url, status] of Object.entries(group.peerStatus)) {
+      if (status.nodeId && rekey.removed.includes(status.nodeId)) {
+        removedUrls.add(url);
+        delete group.peerStatus[url];
+      }
+    }
+    group.peers = group.peers.filter((url) => !removedUrls.has(url));
+    group.lastError = null;
+  }
+
+  /** Applique un avis de changement de mot de passe reçu ; renvoie vrai si la machine a basculé. */
+  applyRekey(group: GroupState, rekey: Rekey): boolean {
+    if (group.id !== rekey.oldId) return false;
+    if (rekey.removed.includes(this.nodeId)) {
+      this.markRevoked(group, group.members[rekey.from]?.label ?? rekey.from);
+      return false;
+    }
+    const identity = this.store.data.node.identity;
+    const master = identity ? unwrap(rekey, this.nodeId, identity) : null;
+    if (!master || groupKeys(master).groupId !== rekey.newId) {
+      group.lastError = "Le mot de passe du groupe a changé, mais cette machine n'a pas reçu la nouvelle clé : rejoignez le groupe avec le nouveau mot de passe.";
+      return false;
+    }
+    if (this.store.group(rekey.newId)) {
+      // Déjà rejointe à la main avec le nouveau mot de passe : l'ancienne copie s'efface d'elle-même.
+      group.enabled = false;
+      group.lastError = "Remplacé par le groupe rejoint avec le nouveau mot de passe.";
+      return false;
+    }
+    this.switchKey(group, master, rekey);
+    this.deps.log(`groupe ${group.name} : nouveau mot de passe appliqué`);
+    this.trigger(group.id, 200);
+    return true;
+  }
+
+  /**
+   * Change le mot de passe du groupe (nouvelle clé déjà dérivée), en retirant éventuellement des machines.
+   * Renvoie l'avis et l'ancienne clé (pour le remettre aux machines gardées), et les machines sans clé publique.
+   */
+  rekey(group: GroupState, master: Buffer, remove: string[]): { rekey: Rekey; oldKeys: GroupKeys; unreachable: string[]; notify: string[] } {
+    const { groupId: newId } = groupKeys(master);
+    if (newId === group.id) throw new Error("C'est déjà le mot de passe du groupe.");
+    if (remove.includes(this.nodeId)) throw new Error("Pour retirer cette machine, quittez le groupe.");
+    const oldKeys = this.keys(group);
+    const base = { oldId: group.id, newId };
+    const wraps: Rekey["wraps"] = {};
+    const unreachable: string[] = [];
+    for (const [nodeId, member] of Object.entries(group.members)) {
+      if (remove.includes(nodeId) || nodeId === this.nodeId) continue;
+      if (member.pub) wraps[nodeId] = wrapFor(master, member.pub, base, nodeId);
+      else unreachable.push(member.label);
+    }
+    const rekey: Rekey = { ...base, from: this.nodeId, at: this.clock.now(), removed: [...new Set(remove)], wraps };
+    // Toutes les machines sont prévenues, retirées comprises (elles cessent aussitôt d'essayer).
+    const notify = Object.entries(group.members)
+      .filter(([nodeId, member]) => nodeId !== this.nodeId && member.url)
+      .map(([, member]) => member.url);
+    this.switchKey(group, master, rekey);
+    return { rekey, oldKeys, unreachable, notify };
+  }
+
+  /** Remet l'avis à ces machines, avec l'ancienne clé ; renvoie le nombre de machines jointes. */
+  async announceRekey(group: GroupState, rekey: Rekey, oldKeys: GroupKeys, urls: string[]): Promise<number> {
+    const results = await Promise.all(
+      urls.map((url) =>
+        this.deps
+          .send(url, oldKeys, { type: "rekey", ...this.identity(group), members: {}, payload: rekey })
+          .then(() => true)
+          .catch(() => false),
+      ),
+    );
+    return results.filter(Boolean).length;
   }
 
   /** Contenus demandés, jusqu'au plafond d'une réponse. */
@@ -694,6 +808,14 @@ export class Engine {
           const pulled = await this.deps.send(url, keys, { type: "pull", ...this.identity(group), versions: this.versions(group) });
           status.nodeId = pulled.from;
           if (pulled.from === this.nodeId) return;
+          if (pulled.revoked) {
+            this.markRevoked(group, pulled.label);
+            return;
+          }
+          if (pulled.rekey) {
+            this.applyRekey(group, pulled.rekey);
+            return;
+          }
           this.absorb(group, pulled, pulled.entries);
           this.forgetWhatTheyForgot(group, pulled.versions, pulled.forgottenBefore);
           const toPush = this.newerThan(group.entries, pulled.versions);
@@ -774,6 +896,7 @@ export class Engine {
       group.conflicts = group.conflicts.filter((conflict) => now - conflict.at < 7 * 24 * 3600 * 1000 && group.entries[conflict.key]);
       this.refreshReport(group);
       this.collectBlobs();
+      if (group.previous && group.previous.until <= now) group.previous = null;
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
     } catch (error) {
@@ -835,6 +958,7 @@ export class Engine {
       approval: group.approval,
       awaiting,
       rejected: Object.keys(group.rejected),
+      revokedBy: group.revokedBy,
       updates: {
         leader: (() => {
           const leader = updateLeader(group, this.nodeId, this.clock.now());

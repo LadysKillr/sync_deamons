@@ -3,6 +3,7 @@ import { networkInterfaces } from "node:os";
 import { z } from "zod";
 import { aad, open, seal, type Envelope, type GroupKeys } from "./crypto";
 import { SHA_PATTERN } from "./blobs";
+import { RekeySchema } from "./rekey";
 import { EntrySchema, MemberSchema, ReportSchema } from "./replica";
 
 /**
@@ -38,6 +39,8 @@ const IdentitySchema = z.object({
 export const RequestSchema = z.discriminatedUnion("type", [
   IdentitySchema.extend({ type: z.literal("pull"), versions: z.record(z.string(), z.string()) }),
   IdentitySchema.extend({ type: z.literal("push"), entries: z.record(z.string(), EntrySchema) }),
+  /** Avis de changement de mot de passe, envoyé avec l'ancienne clé (0.2.0). */
+  IdentitySchema.extend({ type: z.literal("rekey"), payload: RekeySchema }),
   /** Demande de contenus de fichiers par empreinte (0.2.0). */
   IdentitySchema.extend({ type: z.literal("blobs"), want: z.array(z.string().regex(SHA_PATTERN)).max(BLOBS_PER_REQUEST) }),
 ]);
@@ -48,6 +51,10 @@ export const ResponseSchema = IdentitySchema.extend({
   versions: z.record(z.string(), z.string()),
   /** Contenus demandés (base64), pour une requête « blobs ». */
   blobs: z.record(z.string().regex(SHA_PATTERN), z.string()).optional(),
+  /** Réponse à une machine en retard d'un changement de mot de passe : l'avis à appliquer. */
+  rekey: RekeySchema.optional(),
+  /** Réponse à une machine retirée du groupe. */
+  revoked: z.boolean().optional(),
 });
 export type SyncResponse = z.infer<typeof ResponseSchema>;
 

@@ -97,6 +97,8 @@ export const GroupViewSchema = z.object({
   awaiting: z.array(
     z.object({ key: z.string(), deletion: z.boolean(), revision: z.string().nullable(), origin: z.string(), at: z.number() }),
   ),
+  /** Cette machine a été retirée du groupe (par qui). */
+  revokedBy: z.string().nullable(),
   /** Clés dont la version actuelle a été refusée ici. */
   rejected: z.array(z.string()),
   /** Suivi des mises à jour des plugins (option du groupe). */
@@ -248,3 +250,13 @@ export const restoreRpc = defineRpc({
 
 /** Vérifie tout de suite les mises à jour des plugins (si cette machine mène pour au moins un groupe). */
 export const checkUpdatesRpc = defineRpc({ name: "sync.updates.check", input: z.object({}), output: z.object({ ok: z.literal(true) }) });
+
+/**
+ * Nouveau mot de passe pour le groupe, en retirant éventuellement des machines. Le nouvel identifiant du groupe est
+ * renvoyé ; `unreachable` : machines sans clé publique (Sync trop ancien), qui devront rejoindre à la main.
+ */
+export const rekeyRpc = defineRpc({
+  name: "sync.group.rekey",
+  input: z.object({ id: z.string(), password: z.string().min(8, "8 caractères au moins"), remove: z.array(z.string()).default([]) }),
+  output: z.object({ id: z.string(), reached: z.number(), unreachable: z.array(z.string()) }),
+});

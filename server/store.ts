@@ -5,10 +5,12 @@ import path from "node:path";
 import { z } from "zod";
 import { GroupModeSchema } from "../shared/model";
 import { EntrySchema, MemberSchema, ReportSchema } from "./replica";
+import { NodeIdentitySchema, REKEY_GRACE_MS, RekeySchema, newIdentity } from "./rekey";
 
 /** Tout l'état du plugin sur cette machine : `<PASEO_HOME>/plugin-data/sync/state.json`, mode 0600. */
 
 export const DEFAULT_PORT = 6780;
+export { REKEY_GRACE_MS };
 /** Passage de secours : 10 min. */
 export const DEFAULT_INTERVAL_SEC = 600;
 
@@ -21,6 +23,8 @@ export const NodeConfigSchema = z.object({
   /** Passage de secours (s) ; les changements locaux sont détectés à part, aussitôt. */
   intervalSec: z.number().int(),
   watch: z.boolean().default(true),
+  /** Paire de clés X25519 de la machine (créée au premier démarrage en 0.2.0). */
+  identity: NodeIdentitySchema.optional(),
 });
 export type NodeConfig = z.infer<typeof NodeConfigSchema>;
 
@@ -71,6 +75,14 @@ export const GroupStateSchema = z.object({
   updateLog: z
     .array(z.object({ id: z.string(), from: z.string().nullable(), to: z.string().nullable(), at: z.number(), error: z.string().nullable() }))
     .default([]),
+  /** Clé d'avant le dernier changement de mot de passe : acceptée jusqu'à `until`, seulement pour remettre l'avis. */
+  previous: z.object({ id: z.string(), key: z.string(), until: z.number() }).nullable().default(null),
+  /** Dernier avis de changement de mot de passe, à remettre aux machines en retard. */
+  rekey: RekeySchema.nullable().default(null),
+  /** Machines retirées du groupe : plus jamais réintégrées par la liste des membres. */
+  revoked: z.array(z.string()).default([]),
+  /** Cette machine a été retirée du groupe (par qui). */
+  revokedBy: z.string().nullable().default(null),
   /** Heure de la plus récente trace de suppression oubliée ici : horizon d'oubli (voir Engine.admissible). */
   forgottenBefore: z.number().default(0),
   entries: z.record(z.string(), EntrySchema),
@@ -117,7 +129,7 @@ export class Store {
       raw = readFileSync(this.file, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        const fresh: StoreFile = { version: 1, node: defaultNode(), groups: [] };
+        const fresh: StoreFile = { version: 1, node: { ...defaultNode(), identity: newIdentity() }, groups: [] };
         this.data = fresh;
         this.save();
         return fresh;
@@ -134,7 +146,13 @@ export class Store {
       writeFileSync(backup, raw, { mode: 0o600 });
       throw new Error(`state.json illisible (copie : ${backup}) : ${parsed.error.issues[0]?.message ?? "format"}`);
     }
-    return parsed.data as StoreFile;
+    const data = parsed.data as StoreFile;
+    if (!data.node.identity) {
+      data.node.identity = newIdentity();
+      this.data = data;
+      this.save();
+    }
+    return data;
   }
 
   save(): void {
@@ -150,6 +168,14 @@ export class Store {
 
   group(id: string): GroupState | undefined {
     return this.data.groups.find((group) => group.id === id);
+  }
+
+  /** Le groupe de cet identifiant, ou celui dont c'était l'identifiant avant un changement de mot de passe récent. */
+  findGroup(id: string, now: number): { group: GroupState; stale: boolean } | undefined {
+    const current = this.group(id);
+    if (current) return { group: current, stale: false };
+    const previous = this.data.groups.find((group) => group.previous?.id === id && group.previous.until > now);
+    return previous ? { group: previous, stale: true } : undefined;
   }
 }
 
@@ -173,6 +199,10 @@ export function newGroupState(input: {
     forgottenBefore: 0,
     history: {},
     conflicts: [],
+    previous: null,
+    rekey: null,
+    revoked: [],
+    revokedBy: null,
     lastUpdateCheckAt: null,
     lastUpdateCheckError: null,
     updateLog: [],

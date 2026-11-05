@@ -64,9 +64,10 @@ function makeNode(name: string, network: Map<string, Node>, extra: Collector[] =
     const peer = network.get(target);
     if (!peer) throw new Error("injoignable");
     const envelope = seal(keys, request, aad("req", keys.groupId));
-    const group = peer.engine.store.group(envelope.g);
-    if (!group) throw new Error("groupe inconnu");
-    const peerKeys = peer.engine.keys(group);
+    // Comme le serveur : l'identifiant courant, ou l'ancien pendant le délai de grâce d'un changement de mot de passe.
+    const found = peer.engine.store.findGroup(envelope.g, wall);
+    if (!found || !found.group.enabled) throw new Error("groupe inconnu");
+    const peerKeys = found.stale ? groupKeys(Buffer.from(found.group.previous!.key, "base64")) : peer.engine.keys(found.group);
     const opened = RequestSchema.parse(open(peerKeys, envelope, aad("req", peerKeys.groupId)));
     const response = await peer.engine.handleIncoming(envelope.g, opened);
     const sealed = seal(peerKeys, response, aad("res", peerKeys.groupId, envelope.n));
@@ -550,6 +551,50 @@ describe("contenus de fichiers", () => {
     writeFileSync(path.join(homeB, ".claude/skills/review/SKILL.md"), "court");
     await rounds([b, a], id, 2);
     expect(readFileSync(path.join(homeA, ".claude/skills/review/SKILL.md"), "utf8")).toBe("court");
+  });
+});
+
+describe("changement de mot de passe et retrait", () => {
+  it("les machines gardées basculent (même en retard), la machine retirée est écartée", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const c = makeNode("c", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    const oldId = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await addGroup(c, [a.url], { create: false });
+    await rounds([a, b, c], oldId, 2);
+    const cId = c.engine.store.data.node.nodeId;
+
+    // B est éteint pendant le changement ; A retire C.
+    network.delete(b.url);
+    const master = await deriveMasterKey("nouveau-mot-de-passe", "Travail");
+    const ga = a.engine.store.group(oldId)!;
+    const { rekey, oldKeys, unreachable, notify } = a.engine.rekey(ga, master, [cId]);
+    expect(unreachable).toEqual([]);
+    expect(await a.engine.announceRekey(ga, rekey, oldKeys, notify)).toBe(1); // C seulement (B éteint)
+    const newId = ga.id;
+    expect(newId).not.toBe(oldId);
+    expect(c.engine.store.group(oldId)!.enabled).toBe(false);
+    expect(c.engine.store.group(oldId)!.revokedBy).toBe("a");
+
+    // B revient : il se présente avec l'ancienne clé, reçoit l'avis et bascule.
+    network.set(b.url, b);
+    await rounds([b], oldId, 1);
+    expect(b.engine.store.group(newId)).toBeDefined();
+    a.memory.state.set(key, plugin("1"));
+    await rounds([a, b], newId, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+
+    // C ne reçoit plus rien et ne revient pas dans la liste des membres.
+    expect(c.memory.state.has(key)).toBe(false);
+    for (const node of [a, b]) expect(Object.keys(node.engine.store.group(newId)!.members)).not.toContain(cId);
+    // Même avec l'ancienne clé, C n'obtient rien d'autre que « retiré ».
+    c.engine.store.group(oldId)!.enabled = true;
+    await rounds([c], oldId, 1);
+    expect(c.engine.store.group(oldId)!.enabled).toBe(false);
+    expect(c.memory.state.has(key)).toBe(false);
   });
 });
 
