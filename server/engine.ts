@@ -576,13 +576,13 @@ export class Engine {
     entries = this.admissible(group, entries);
     this.clock.observe(maxTime(entries));
     const changed = mergeEntries(group.entries, entries, (key, current, incoming, replaced) => this.compare(group, key, current, incoming, replaced));
-    mergeMembers(group.members, Object.fromEntries(Object.entries(from.members).filter(([nodeId]) => !group.revoked.includes(nodeId))));
+    mergeMembers(group.members, Object.fromEntries(Object.entries(from.members).filter(([nodeId]) => !group.revoked.includes(nodeId))), this.nodeId);
     // Seule cette machine parle d'elle-même : un compte rendu à son nom venu d'ailleurs est ignoré.
     const { [this.nodeId]: _mine, ...others } = from.reports ?? {};
     mergeReports(group.reports, others);
     if (from.from !== this.nodeId && validMemberUrl(from.url) && !group.revoked.includes(from.from)) {
-      // La clé publique vient de la liste que la machine publie sur elle-même.
-      const pub = from.members[from.from]?.pub;
+      // La clé publique vient de la fiche que la machine publie sur elle-même (ou de celle déjà connue).
+      const pub = from.members[from.from]?.pub ?? group.members[from.from]?.pub;
       group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now(), ...(pub ? { pub } : {}) };
     }
     return changed;

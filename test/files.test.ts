@@ -103,6 +103,18 @@ describe("fichiers incertains", () => {
   });
 });
 
+describe("membres : clé publique", () => {
+  it("une copie relayée sans clé publique ne l'efface pas, et sa propre fiche ne vient jamais d'ailleurs", () => {
+    const members = {
+      n_a: { label: "a", url: "http://a:6780", seenAt: 1, pub: "PUB_A" },
+      n_self: { label: "moi", url: "http://moi:6780", seenAt: 1, pub: "PUB_SELF" },
+    };
+    mergeMembers(members, { n_a: { label: "a", url: "http://a:6780", seenAt: 5 }, n_self: { label: "moi", url: "http://moi:6780", seenAt: 9 } }, "n_self");
+    expect(members.n_a).toEqual({ label: "a", url: "http://a:6780", seenAt: 5, pub: "PUB_A" });
+    expect(members.n_self.seenAt).toBe(1);
+  });
+});
+
 describe("membres", () => {
   it("ignore et nettoie les membres sans adresse", () => {
     const members = { n1: { label: "a", url: "http://100.64.0.1:6780", seenAt: 1 }, ghost: { label: "check", url: "", seenAt: 2 } };

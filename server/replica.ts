@@ -136,11 +136,18 @@ export function validMemberUrl(url: string): boolean {
   return /^https?:\/\/[^\s/]+/.test(url);
 }
 
-export function mergeMembers(local: Members, remote: Members): void {
+/**
+ * La clé publique d'une machine ne change pas : une copie relayée sans elle (machine plus ancienne, qui ne connaît pas
+ * ce champ) ne l'efface jamais. `selfId` : la fiche de cette machine-ci ne se prend jamais chez les autres.
+ */
+export function mergeMembers(local: Members, remote: Members, selfId?: string): void {
   for (const [nodeId, incoming] of Object.entries(remote)) {
-    if (!validMemberUrl(incoming.url)) continue;
+    if (!validMemberUrl(incoming.url) || nodeId === selfId) continue;
     const current = local[nodeId];
-    if (current === undefined || incoming.seenAt > current.seenAt) local[nodeId] = { ...incoming };
+    if (current === undefined || incoming.seenAt > current.seenAt) {
+      const pub = incoming.pub ?? current?.pub;
+      local[nodeId] = { label: incoming.label, url: incoming.url, seenAt: incoming.seenAt, ...(pub ? { pub } : {}) };
+    }
   }
 }
 
