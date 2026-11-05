@@ -50,6 +50,14 @@ Machines must be able to reach each other over HTTP on port **6780** (configurab
 - **Registry plugins** are first installed through the registry, so the listing link is kept. If the registry's reviewed revision doesn't match the group's, the plugin is reinstalled from its direct source at the exact revision. Its settings are backed up around the reinstall, because `paseo plugin remove` deletes them.
 - **Plugin and config changes** go through the `paseo` CLI (`plugin install/update/enable/disable/remove/reload`, `daemon config set/unset`), which must be on the daemon's `PATH`.
 
+## Status on every machine
+
+Each machine publishes a small report to its group: its Sync version, what it still has to apply, its failures (with the error message) and a digest of its replica. The Sync screen uses these reports to show:
+- one line per machine: Sync version (flagged when it differs), up to date / syncing / N failures;
+- per item, for example `workspace-spaces · 6/6`, or the error on the machine where the install failed and the machines still applying it.
+
+Machines running Sync 0.1.3 or older send no report and are shown as "unknown" until updated.
+
 ## Security
 
 - **Key derivation**: `scrypt(password, salt = sha256(group name))` with N = 2^15, then HKDF subkeys.

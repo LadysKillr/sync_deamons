@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { GroupModeSchema } from "../shared/model";
-import { EntrySchema, MemberSchema } from "./replica";
+import { EntrySchema, MemberSchema, ReportSchema } from "./replica";
 
 /** Tout l'état du plugin sur cette machine : `<PASEO_HOME>/plugin-data/sync/state.json`, mode 0600. */
 
@@ -50,6 +50,8 @@ export const GroupStateSchema = z.object({
   baseline: z.record(z.string(), z.string()),
   attempts: z.record(z.string(), AttemptSchema),
   members: z.record(z.string(), MemberSchema),
+  /** Comptes rendus des machines (le sien compris), pour l'état par machine. */
+  reports: z.record(z.string(), ReportSchema).default({}),
   peerStatus: z.record(z.string(), PeerStatusSchema),
   lastSyncAt: z.number().nullable(),
   lastError: z.string().nullable(),
@@ -144,6 +146,7 @@ export function newGroupState(input: {
     baseline: {},
     attempts: {},
     members: {},
+    reports: {},
     peerStatus: {},
     lastSyncAt: null,
     lastError: null,

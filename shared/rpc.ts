@@ -36,6 +36,37 @@ export const ActivityViewSchema = z.object({
   origin: z.string(),
 });
 
+export const MachineStatusSchema = z.object({
+  nodeId: z.string(),
+  label: z.string(),
+  self: z.boolean(),
+  /** Version de Sync sur cette machine ; null si elle ne publie pas encore de compte rendu (0.1.3 et avant). */
+  version: z.string().nullable(),
+  mode: GroupModeSchema.nullable(),
+  /** Même réplique que cette machine-ci ; null si inconnu. */
+  upToDate: z.boolean().nullable(),
+  reportAt: z.number().nullable(),
+  applied: z.number(),
+  pending: z.number(),
+  errors: z.number(),
+});
+export type MachineStatus = z.infer<typeof MachineStatusSchema>;
+
+export const ItemStatusSchema = z.object({
+  /** Clé de l'élément ; les fichiers sont regroupés par ensemble (`file/<ensemble>`). */
+  key: z.string(),
+  /** Nombre de fichiers pour un ensemble, 1 sinon. */
+  count: z.number(),
+  ok: z.array(z.string()),
+  pending: z.array(z.string()),
+  errors: z.array(z.object({ machine: z.string(), message: z.string() })),
+  /** Machines dont l'état est inconnu (ancienne version, ou synchronisation en cours). */
+  unknown: z.array(z.string()),
+  /** Machines « envoie seulement », qui n'appliquent rien. */
+  notApplied: z.array(z.string()),
+});
+export type ItemStatus = z.infer<typeof ItemStatusSchema>;
+
 export const GroupViewSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -52,6 +83,8 @@ export const GroupViewSchema = z.object({
   recent: z.array(ActivityViewSchema),
   /** Éléments que ce groupe ignore ici parce qu'un groupe placé avant lui les gère déjà. */
   shadowed: z.array(z.string()),
+  machines: z.array(MachineStatusSchema),
+  itemStatus: z.array(ItemStatusSchema),
 });
 export type GroupView = z.infer<typeof GroupViewSchema>;
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 /**
@@ -25,6 +26,44 @@ export type Entries = Record<string, Entry>;
 export const MemberSchema = z.object({ label: z.string().max(120), url: z.string().max(500), seenAt: z.number().int().nonnegative() });
 export type Member = z.infer<typeof MemberSchema>;
 export type Members = Record<string, Member>;
+
+/**
+ * Compte rendu qu'une machine publie sur elle-même : ce qu'elle n'a pas encore appliqué et ses échecs, plus
+ * l'empreinte de sa réplique. Deux machines de même empreinte ont la même réplique : chez l'autre, un élément qui
+ * n'est ni en attente ni en échec est donc appliqué. Seule la machine concernée écrit son compte rendu ; `at` vient
+ * de son horloge hybride et départage les copies qui circulent.
+ */
+export const REPORT_LIMIT = 100;
+export const ReportSchema = z.object({
+  at: z.number().int().nonnegative(),
+  digest: z.string().max(64),
+  version: z.string().max(40),
+  mode: z.enum(["both", "receive", "send"]),
+  applied: z.number().int().nonnegative(),
+  /** Nombre réel d'éléments en attente (la liste `pending` est tronquée à REPORT_LIMIT). */
+  pendingTotal: z.number().int().nonnegative(),
+  pending: z.array(z.string().max(500)).max(REPORT_LIMIT),
+  errors: z.record(z.string().max(500), z.string().max(500)),
+});
+export type Report = z.infer<typeof ReportSchema>;
+export type Reports = Record<string, Report>;
+
+export function mergeReports(local: Reports, remote: Reports | undefined): void {
+  for (const [nodeId, incoming] of Object.entries(remote ?? {})) {
+    const current = local[nodeId];
+    if (current === undefined || incoming.at > current.at) local[nodeId] = { ...incoming, pending: [...incoming.pending], errors: { ...incoming.errors } };
+  }
+}
+
+/** Empreinte de la réplique entière (clés triées, versions). */
+export function replicaDigest(entries: Entries): string {
+  const hash = createHash("sha256");
+  for (const key of Object.keys(entries).sort()) {
+    const entry = entries[key]!;
+    hash.update(`${key}=${entry.t}.${entry.o}.${entry.h}\n`);
+  }
+  return hash.digest("base64url").slice(0, 32);
+}
 
 export const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000;
 /** Une machine muette depuis plus longtemps est oubliée de la liste des membres. */

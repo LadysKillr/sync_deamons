@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { networkInterfaces } from "node:os";
 import { z } from "zod";
 import { aad, open, seal, type Envelope, type GroupKeys } from "./crypto";
-import { EntrySchema, MemberSchema } from "./replica";
+import { EntrySchema, MemberSchema, ReportSchema } from "./replica";
 
 /**
  * Transport HTTP entre daemons. Tout le contenu est chiffré et authentifié (voir crypto.ts) : seul l'identifiant
@@ -25,6 +25,8 @@ const IdentitySchema = z.object({
   url: z.string().max(500),
   ts: z.number(),
   members: z.record(z.string(), MemberSchema),
+  /** Absent chez les versions 0.1.3 et avant. */
+  reports: z.record(z.string(), ReportSchema).optional(),
 });
 
 export const RequestSchema = z.discriminatedUnion("type", [

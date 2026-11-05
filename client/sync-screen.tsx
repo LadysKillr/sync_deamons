@@ -16,6 +16,7 @@ import {
   type LocalPlugin,
   type StatusView,
 } from "../shared/rpc";
+import { MachineStatusPanel } from "./machine-status";
 import { Button, Chip, Field, Section, Toggle, ago, useStyles, type Styles } from "./ui";
 
 const MODES: Array<{ id: GroupMode; label: string; hint: string }> = [
@@ -223,6 +224,8 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
           );
         })}
       </View>
+
+      <MachineStatusPanel s={s} group={group} />
 
       {group.problems.length > 0 ? (
         <View style={{ gap: 2 }}>

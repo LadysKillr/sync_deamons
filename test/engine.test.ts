@@ -274,6 +274,53 @@ describe("éléments incertains ou ignorés", () => {
   });
 });
 
+describe("état par machine", () => {
+  it("chaque machine voit ce qui est appliqué ou en échec chez les autres", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const c = makeNode("c", network);
+    const key = `${KEY_PREFIX.plugin}workspace-spaces`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await addGroup(c, [a.url], { create: false });
+    await rounds([a, b, c], id, 2);
+
+    a.memory.state.set(key, plugin("6ee031d"));
+    c.memory.failNext.add(key);
+    await rounds([a, b, c], id, 2);
+    // A voit : appliqué chez a et b, échec chez c avec le message.
+    let item = a.engine.view(a.engine.store.group(id)!).itemStatus.find((entry) => entry.key === key)!;
+    expect(item.ok.sort()).toEqual(["a", "b"]);
+    expect(item.errors).toEqual([{ machine: "c", message: "échec simulé" }]);
+    const machines = a.engine.view(a.engine.store.group(id)!).machines;
+    expect(machines.find((machine) => machine.label === "c")!.errors).toBe(1);
+    expect(machines.every((machine) => machine.version !== null)).toBe(true);
+
+    // C réessaie plus tard et réussit : 3/3, vu aussi depuis B.
+    wall += 120_000;
+    await rounds([c, a, b], id, 2);
+    item = b.engine.view(b.engine.store.group(id)!).itemStatus.find((entry) => entry.key === key)!;
+    expect(item.ok.sort()).toEqual(["a", "b", "c"]);
+    expect(item.errors).toHaveLength(0);
+  });
+
+  it("une machine sans compte rendu (ancienne version) est marquée inconnue", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    a.memory.state.set(key, plugin("1"));
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    delete a.engine.store.group(id)!.reports[b.engine.store.data.node.nodeId];
+    const item = a.engine.statusByMachine(a.engine.store.group(id)!).itemStatus.find((entry) => entry.key === key)!;
+    expect(item.ok).toEqual(["a"]);
+    expect(item.unknown).toEqual(["b"]);
+  });
+});
+
 describe("transport HTTP", () => {
   it("échange chiffré de bout en bout, refuse un mauvais mot de passe", async () => {
     const keys = groupKeys(await deriveMasterKey("motdepasse-solide", "Jeux"));

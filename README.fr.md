@@ -40,6 +40,14 @@ Les machines doivent se joindre en HTTP sur le port 6780 (réglable). Par défau
 - Une machine qui **rejoint** attend un premier contact, adopte l'état du groupe, puis apporte ce qu'elle a en plus.
 - Plugins du registre : réinstallés par le registre (fiche conservée) ; si sa révision revue ne correspond pas, réinstallation depuis la source directe à la révision exacte. Les réglages sont sauvegardés autour d'une réinstallation (`plugin remove` les efface).
 
+## État sur chaque machine
+
+Chaque machine publie dans son groupe un petit compte rendu : sa version de Sync, ce qu'elle doit encore appliquer, ses échecs (avec le message d'erreur) et l'empreinte de sa réplique. L'écran Sync en tire :
+- une ligne par machine : version de Sync (signalée si elle diffère), à jour / en cours / N en échec ;
+- par élément, par exemple `workspace-spaces · 6/6`, ou l'erreur sur la machine où l'installation a échoué et celles où elle est en cours.
+
+Les machines en Sync 0.1.3 ou avant n'envoient pas de compte rendu et apparaissent « inconnues » jusqu'à leur mise à jour.
+
 ## Sécurité
 
 - Clé : `scrypt(mot de passe, sel = sha256(nom du groupe))`, N = 2^15 ; sous-clés HKDF.

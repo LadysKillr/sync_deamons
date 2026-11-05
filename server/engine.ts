@@ -1,8 +1,25 @@
-import { DEFAULT_SCOPE, GroupScopeSchema, SCOPE_KEY, keyInScope, type GroupScope } from "../shared/model";
+import { DEFAULT_SCOPE, GroupScopeSchema, KEY_PREFIX, SCOPE_KEY, keyInScope, type GroupScope } from "../shared/model";
 import type { GroupView, StatusView } from "../shared/rpc";
 import type { Collector } from "./collectors";
 import { groupKeys, hashValue, type GroupKeys } from "./crypto";
-import { HybridClock, maxTime, mergeEntries, mergeMembers, newer, pruneMembers, validMemberUrl, pruneTombstones, type Entries, type Entry, type Json } from "./replica";
+import {
+  HybridClock,
+  REPORT_LIMIT,
+  maxTime,
+  mergeEntries,
+  mergeMembers,
+  mergeReports,
+  newer,
+  pruneMembers,
+  pruneTombstones,
+  replicaDigest,
+  validMemberUrl,
+  type Entries,
+  type Entry,
+  type Json,
+  type Report,
+} from "./replica";
+import { SYNC_VERSION } from "../shared/version";
 import type { GroupState, Store } from "./store";
 import type { SyncRequest, SyncResponse } from "./transport";
 
@@ -253,10 +270,51 @@ export class Engine {
     }
   }
 
+  /** Éléments que cette machine doit appliquer et n'a pas encore appliqués. */
+  private pendingKeys(group: GroupState): string[] {
+    if (group.mode === "send") return [];
+    const scope = this.scopeOf(group);
+    return Object.entries(group.entries)
+      .filter(([key, entry]) => key !== SCOPE_KEY && keyInScope(scope, key) && this.owned(group, key) && !this.ignored(key) && entry.h !== group.baseline[key])
+      .map(([key]) => key);
+  }
+
+  /** Le compte rendu de cette machine, recalculé à chaque envoi pour rester à jour. */
+  private refreshReport(group: GroupState): Report {
+    const scope = this.scopeOf(group);
+    const pending = this.pendingKeys(group);
+    const errors = Object.fromEntries(
+      Object.entries(group.attempts)
+        .filter(([key, attempt]) => attempt.error && group.entries[key]?.h === attempt.h)
+        .slice(0, REPORT_LIMIT)
+        .map(([key, attempt]) => [key, (attempt.error ?? "").slice(0, 500)]),
+    );
+    const failed = new Set(Object.keys(errors));
+    const waiting = new Set(pending);
+    let applied = 0;
+    for (const [key, entry] of Object.entries(group.entries)) {
+      if (key === SCOPE_KEY || entry.v === null || !keyInScope(scope, key) || !this.owned(group, key)) continue;
+      if (!waiting.has(key) && !failed.has(key)) applied += 1;
+    }
+    const report: Report = {
+      at: this.clock.tick(),
+      digest: replicaDigest(group.entries),
+      version: SYNC_VERSION,
+      mode: group.mode,
+      applied,
+      pendingTotal: pending.length,
+      pending: pending.slice(0, REPORT_LIMIT),
+      errors,
+    };
+    group.reports[this.nodeId] = report;
+    return report;
+  }
+
   private identity(group: GroupState) {
     const url = this.deps.selfUrl();
     group.members[this.nodeId] = { label: this.store.data.node.label, url, seenAt: this.clock.now() };
-    return { from: this.nodeId, label: this.store.data.node.label, url, ts: this.clock.now(), members: group.members };
+    this.refreshReport(group);
+    return { from: this.nodeId, label: this.store.data.node.label, url, ts: this.clock.now(), members: group.members, reports: group.reports };
   }
 
   private versions(group: GroupState): Record<string, string> {
@@ -273,10 +331,17 @@ export class Engine {
     return out;
   }
 
-  private absorb(group: GroupState, from: { from: string; label: string; url: string; members: GroupState["members"] }, entries: Entries): string[] {
+  private absorb(
+    group: GroupState,
+    from: { from: string; label: string; url: string; members: GroupState["members"]; reports?: GroupState["reports"] },
+    entries: Entries,
+  ): string[] {
     this.clock.observe(maxTime(entries));
     const changed = mergeEntries(group.entries, entries);
     mergeMembers(group.members, from.members);
+    // Seule cette machine parle d'elle-même : un compte rendu à son nom venu d'ailleurs est ignoré.
+    const { [this.nodeId]: _mine, ...others } = from.reports ?? {};
+    mergeReports(group.reports, others);
     if (from.from !== this.nodeId && validMemberUrl(from.url)) group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now() };
     return changed;
   }
@@ -391,6 +456,8 @@ export class Engine {
       const now = this.clock.now();
       pruneTombstones(group.entries, now);
       pruneMembers(group.members, now, this.nodeId);
+      for (const nodeId of Object.keys(group.reports)) if (!group.members[nodeId]) delete group.reports[nodeId];
+      this.refreshReport(group);
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
     } catch (error) {
@@ -439,9 +506,12 @@ export class Engine {
     const problems = Object.entries(group.attempts)
       .filter(([, attempt]) => attempt.error)
       .map(([key, attempt]) => ({ key, error: attempt.error ?? "", at: attempt.at }));
+    const { machines, itemStatus } = this.statusByMachine(group);
     return {
       id: group.id,
       name: group.name,
+      machines,
+      itemStatus,
       mode: group.mode,
       enabled: group.enabled,
       peers: group.peers,
@@ -455,6 +525,70 @@ export class Engine {
       recent: group.recent.slice(0, 20),
       shadowed: shadowed.slice(0, 50),
     };
+  }
+
+  /** État de chaque élément sur chaque machine, d'après les comptes rendus. */
+  statusByMachine(group: GroupState): Pick<GroupView, "machines" | "itemStatus"> {
+    const own = this.refreshReport(group);
+    const scope = this.scopeOf(group);
+    const members = Object.entries(group.members).sort(([a], [b]) => (a === this.nodeId ? -1 : b === this.nodeId ? 1 : 0));
+    const machines = members.map(([nodeId, member]) => {
+      const report = nodeId === this.nodeId ? own : group.reports[nodeId];
+      return {
+        nodeId,
+        label: member.label,
+        self: nodeId === this.nodeId,
+        version: report?.version ?? null,
+        mode: report?.mode ?? null,
+        upToDate: report ? report.digest === own.digest : null,
+        reportAt: report?.at ?? null,
+        applied: report?.applied ?? 0,
+        pending: report?.pendingTotal ?? 0,
+        errors: report ? Object.keys(report.errors).length : 0,
+      };
+    });
+
+    // Les fichiers d'un même ensemble forment une seule ligne.
+    const groupKey = (key: string) => (key.startsWith(KEY_PREFIX.file) ? key.split("/").slice(0, 2).join("/") : key);
+    const items = new Map<string, string[]>();
+    for (const [key, entry] of Object.entries(group.entries)) {
+      if (key === SCOPE_KEY || entry.v === null || !keyInScope(scope, key) || this.ignored(key)) continue;
+      const id = groupKey(key);
+      items.set(id, [...(items.get(id) ?? []), key]);
+    }
+
+    const itemStatus = [...items].map(([id, keys]) => {
+      const status = { key: id, count: keys.length, ok: [] as string[], pending: [] as string[], errors: [] as Array<{ machine: string; message: string }>, unknown: [] as string[], notApplied: [] as string[] };
+      for (const [nodeId, member] of members) {
+        const report = nodeId === this.nodeId ? own : group.reports[nodeId];
+        if (!report) {
+          status.unknown.push(member.label);
+          continue;
+        }
+        if (report.mode === "send") {
+          status.notApplied.push(member.label);
+          continue;
+        }
+        const failed = keys.find((key) => report.errors[key] !== undefined);
+        if (failed) {
+          status.errors.push({ machine: member.label, message: report.errors[failed]! });
+          continue;
+        }
+        if (keys.some((key) => report.pending.includes(key))) {
+          status.pending.push(member.label);
+          continue;
+        }
+        // Liste d'attente tronquée, ou réplique différente : on ne peut pas conclure.
+        const truncated = report.pendingTotal > report.pending.length;
+        if (report.digest === own.digest && !truncated) status.ok.push(member.label);
+        else status.unknown.push(member.label);
+      }
+      return status;
+    });
+    // Plugins d'abord, puis réglages, config et fichiers ; problèmes en tête de chaque catégorie.
+    const rank = (key: string) => ["plugin/", "settings/", "config/", "file/"].findIndex((prefix) => key.startsWith(prefix));
+    itemStatus.sort((a, b) => rank(a.key) - rank(b.key) || b.errors.length - a.errors.length || a.key.localeCompare(b.key));
+    return { machines, itemStatus };
   }
 
   status(node: StatusView["node"]): StatusView {
