@@ -15,8 +15,16 @@ class MemoryCollector implements Collector {
   readonly name = "memory";
   state = new Map<string, Json>();
   failNext = new Set<string>();
+  unsure = new Set<string>();
+  temporary = new Set<string>();
   owns(): boolean {
     return true;
+  }
+  uncertain(key: string): boolean {
+    return this.unsure.has(key);
+  }
+  ignores(key: string): boolean {
+    return this.temporary.has(key);
   }
   async snapshot(scope: GroupScope): Promise<Map<string, Json>> {
     return new Map([...this.state].filter(([key]) => keyInScope(scope, key)));
@@ -216,6 +224,53 @@ describe("moteur", () => {
     await rounds([b, a], id, 2);
     expect(a.memory.state.get(`${KEY_PREFIX.plugin}kanban`)).toEqual(plugin("1"));
     expect(b.memory.state.get(`${KEY_PREFIX.plugin}kanban`)).toEqual(plugin("1"));
+  });
+});
+
+describe("éléments incertains ou ignorés", () => {
+  it("un fichier absent le temps d'une écriture n'est pas supprimé ailleurs", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    a.memory.state.set(key, plugin("1"));
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.has(key)).toBe(true);
+
+    // Sur A, le relevé ne le voit pas (lu pendant son remplacement) : aucune suppression publiée.
+    a.memory.state.delete(key);
+    a.memory.unsure.add(key);
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+    expect(a.engine.store.group(id)!.entries[key]!.v).not.toBeNull();
+
+    // Il revient : rien ne bouge non plus.
+    a.memory.unsure.clear();
+    a.memory.state.set(key, plugin("1"));
+    await rounds([a, b], id, 2);
+    expect(a.engine.store.group(id)!.recent.filter((item) => item.key === key && item.action === "deleted")).toHaveLength(0);
+  });
+
+  it("une clé devenue ignorée (temporaire) est oubliée sans suppression ni application", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}brouillon`;
+    a.memory.state.set(key, plugin("1"));
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.has(key)).toBe(true);
+
+    // Nouvelle règle sur les deux : la clé n'est plus suivie. A la supprime chez lui, B ne doit pas suivre.
+    a.memory.temporary.add(key);
+    b.memory.temporary.add(key);
+    a.memory.state.delete(key);
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+    expect(a.engine.store.group(id)!.baseline[key]).toBeUndefined();
   });
 });
 

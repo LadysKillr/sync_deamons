@@ -85,6 +85,24 @@ describe("fichiers", () => {
 
 import { mergeMembers, pruneMembers } from "../server/replica";
 
+describe("fichiers incertains", () => {
+  it("note incertain un fichier trop gros et ignore les noms temporaires", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "psync-home-d-"));
+    mkdirSync(path.join(home, ".claude/skills"), { recursive: true });
+    writeFileSync(path.join(home, ".claude/skills/gros.bin"), Buffer.alloc(5 * 1024 * 1024));
+    writeFileSync(path.join(home, ".claude/skills/ok.md"), "ok");
+    const collector = new FilesCollector(() => undefined, home);
+    const snapshot = await collector.snapshot(scope);
+    expect(snapshot.has("file/skills/ok.md")).toBe(true);
+    expect(snapshot.has("file/skills/gros.bin")).toBe(false);
+    expect(collector.uncertain("file/skills/gros.bin")).toBe(true);
+    expect(collector.uncertain("file/skills/ok.md")).toBe(false);
+    expect(collector.ignores("file/skills/notes.tmp")).toBe(true);
+    expect(collector.ignores("file/skills/dossier.sync-1/a.md")).toBe(true);
+    expect(collector.ignores("file/skills/ok.md")).toBe(false);
+  });
+});
+
 describe("membres", () => {
   it("ignore et nettoie les membres sans adresse", () => {
     const members = { n1: { label: "a", url: "http://100.64.0.1:6780", seenAt: 1 }, ghost: { label: "check", url: "", seenAt: 2 } };

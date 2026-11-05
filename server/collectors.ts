@@ -28,6 +28,13 @@ export interface Collector {
   snapshot(scope: GroupScope): Promise<Map<string, Json>>;
   owns(key: string): boolean;
   apply(changes: Change[]): Promise<ApplyOutcome[]>;
+  /**
+   * Clé absente du dernier instantané sans être supprimée pour autant (fichier qui a disparu pendant la lecture,
+   * devenu trop gros, limite atteinte) : le moteur n'en publie pas la suppression.
+   */
+  uncertain?(key: string): boolean;
+  /** Clé que ce collecteur ne synchronise jamais (fichier temporaire) : oubliée, sans suppression publiée. */
+  ignores?(key: string): boolean;
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -424,12 +431,25 @@ export class FilesCollector implements Collector {
     private readonly home = homedir(),
   ) {}
 
+  /** Clés (ou préfixes de dossier) incertaines au dernier instantané. */
+  private unsure: string[] = [];
+
   owns(key: string): boolean {
     return key.startsWith(KEY_PREFIX.file);
   }
 
+  uncertain(key: string): boolean {
+    return this.unsure.some((prefix) => key === prefix || key.startsWith(`${prefix}/`));
+  }
+
+  ignores(key: string): boolean {
+    return this.owns(key) && key.slice(KEY_PREFIX.file.length).split("/").slice(1).some((segment) => TEMPORARY_NAME.test(segment));
+  }
+
   async snapshot(scope: GroupScope): Promise<Map<string, Json>> {
     const out = new Map<string, Json>();
+    const unsure: string[] = [];
+    this.unsure = unsure;
     this.sets = new Map(scope.files.sets.map((set) => [set.id, expandHome(set.path, this.home)]));
     if (!scope.files.enabled) return out;
     for (const set of scope.files.sets) {
@@ -437,12 +457,15 @@ export class FilesCollector implements Collector {
       if (!existsSync(root)) continue;
       let total = 0;
       let count = 0;
+      const keyOf = (relative: string) => `${KEY_PREFIX.file}${set.id}/${relative || path.basename(root)}`;
+      // Un dossier ou un fichier qui manque à l'appel n'est pas une suppression : on le note incertain.
+      const unsureOf = (relative: string) => unsure.push(relative ? keyOf(relative) : `${KEY_PREFIX.file}${set.id}`);
       const visit = (absolute: string, relative: string) => {
         let info: ReturnType<typeof lstatSync>;
         try {
           info = lstatSync(absolute);
         } catch (error) {
-          if (vanished(error)) return;
+          if (vanished(error)) return void unsureOf(relative);
           throw error;
         }
         if (info.isSymbolicLink()) return;
@@ -451,7 +474,7 @@ export class FilesCollector implements Collector {
           try {
             names = readdirSync(absolute).sort();
           } catch (error) {
-            if (vanished(error)) return;
+            if (vanished(error)) return void unsureOf(relative);
             throw error;
           }
           for (const name of names) {
@@ -461,22 +484,26 @@ export class FilesCollector implements Collector {
           return;
         }
         if (!info.isFile()) return;
-        if (info.size > FILE_LIMITS.perFile) return this.log(`fichiers ${set.id} : ${relative} trop gros, ignoré`);
+        if (info.size > FILE_LIMITS.perFile) {
+          unsureOf(relative);
+          return this.log(`fichiers ${set.id} : ${relative} trop gros, ignoré`);
+        }
         if (total + info.size > FILE_LIMITS.perSet || count >= FILE_LIMITS.filesPerSet) {
+          unsureOf(relative);
           return this.log(`fichiers ${set.id} : limite atteinte, ${relative} ignoré`);
         }
         let content: Buffer;
         try {
           content = readFileSync(absolute);
         } catch (error) {
-          if (vanished(error)) return;
+          if (vanished(error)) return void unsureOf(relative);
           throw error;
         }
         total += info.size;
         count += 1;
         const value: FileValue = { b64: content.toString("base64"), mode: info.mode & 0o777 };
         // Un fichier seul (pas un dossier) a pour chemin relatif son propre nom.
-        out.set(`${KEY_PREFIX.file}${set.id}/${relative || path.basename(root)}`, value);
+        out.set(keyOf(relative), value);
       };
       visit(root, "");
     }

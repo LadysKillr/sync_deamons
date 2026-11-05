@@ -121,6 +121,15 @@ export class Engine {
     this.activity(group, SCOPE_KEY, "published", this.nodeId);
   }
 
+  private collectorFor(key: string): Collector | undefined {
+    return this.deps.collectors.find((collector) => collector.owns(key));
+  }
+
+  /** Clé jamais synchronisée (fichier temporaire) : à oublier sans rien publier. */
+  private ignored(key: string): boolean {
+    return this.collectorFor(key)?.ignores?.(key) ?? false;
+  }
+
   private async snapshot(scope: GroupScope): Promise<Map<string, Json>> {
     const all = new Map<string, Json>();
     for (const collector of this.deps.collectors) {
@@ -137,6 +146,12 @@ export class Engine {
     const keys = new Set<string>([...local.keys(), ...Object.keys(group.baseline)]);
     for (const key of keys) {
       if (key === SCOPE_KEY || !keyInScope(scope, key) || !this.owned(group, key)) continue;
+      if (this.ignored(key)) {
+        delete group.baseline[key];
+        continue;
+      }
+      // Absent du relevé sans être supprimé (lu pendant une écriture, trop gros…) : rien à publier ce coup-ci.
+      if (!local.has(key) && this.collectorFor(key)?.uncertain?.(key)) continue;
       const value = local.get(key) ?? null;
       const hash = hashValue(value);
       const base = group.baseline[key];
@@ -180,6 +195,7 @@ export class Engine {
       const base = group.baseline[key];
       if (entry.h === base) continue;
       if (base === undefined && entry.v === null) {
+      if (this.ignored(key)) continue;
         group.baseline[key] = entry.h;
         continue;
       }
@@ -211,9 +227,18 @@ export class Engine {
       }
       for (const { key } of changes) {
         const entry = wanted.get(key)!;
+        let error = errors.get(key) ?? null;
+        if (!after.has(key) && collector.uncertain?.(key)) {
+          // État illisible juste après l'écriture : la référence ne bouge pas, on réessaiera plus tard.
+          const previous = group.attempts[key];
+          const count = previous && previous.h === entry.h ? previous.count + 1 : 1;
+          const message = error ?? "écrit, mais illisible ou ignoré ici (taille, limite)";
+          group.attempts[key] = { h: entry.h, at: this.clock.now(), error: message, count };
+          continue;
+        }
         const obtained = hashValue(after.get(key) ?? null);
         group.baseline[key] = obtained;
-        const error = errors.get(key) ?? null;
+        error = errors.get(key) ?? null;
         if (obtained === entry.h && error === null) {
           delete group.attempts[key];
           this.activity(group, key, entry.v === null ? "deleted" : "applied", entry.o);

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
+import { TEMPORARY_NAME } from "./collectors";
 
 /**
  * Détection des changements locaux : tout ce que Sync suit laisse une trace sur disque.
@@ -21,7 +22,8 @@ export interface WatchTarget {
   names?: string[];
 }
 
-const IGNORED = /(\.tmp$|\.sync-|\.sync-backup-|~$|\.swp$)/;
+/** Même règle que le relevé des fichiers : un fichier en cours d'écriture ne déclenche rien. */
+const IGNORED = TEMPORARY_NAME;
 
 export class ChangeWatcher {
   private watchers: FSWatcher[] = [];
