@@ -6,6 +6,7 @@ import type { input as ZodInput, output as ZodOutput, ZodType } from "zod";
 import { DEFAULT_SCOPE } from "./shared/model";
 import {
   InviteSchema,
+  decideRpc,
   groupCreateRpc,
   groupRemoveRpc,
   groupUpdateRpc,
@@ -150,8 +151,10 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     return { id: groupId };
   });
 
-  handle(groupUpdateRpc, async ({ id, peers, mode, enabled, scope, move }) => {
+  handle(groupUpdateRpc, async ({ id, peers, mode, enabled, scope, move, exclude, approval }) => {
     const group = requireGroup(id);
+    if (exclude !== undefined) group.exclude = [...new Set(exclude.map((pattern) => pattern.trim()).filter(Boolean))];
+    if (approval !== undefined) group.approval = approval;
     if (peers !== undefined) group.peers = [...new Set(peers)];
     if (mode !== undefined) group.mode = mode;
     if (enabled !== undefined) group.enabled = enabled;
@@ -166,6 +169,14 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     rewatch();
     void engine.run(id);
     return { ok: true as const };
+  });
+
+  handle(decideRpc, async ({ id, keys, decision }) => {
+    const group = requireGroup(id);
+    const count = engine.decide(group, keys, decision);
+    store.save();
+    void engine.run(id);
+    return { count };
   });
 
   handle(groupRemoveRpc, async ({ id }) => {

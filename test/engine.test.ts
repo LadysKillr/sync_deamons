@@ -314,6 +314,70 @@ describe("longue absence", () => {
   });
 });
 
+describe("exclusions et approbation", () => {
+  it("une machine qui exclut un plugin ne l'installe pas, ne publie rien dessus, et les autres le voient", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const kanban = `${KEY_PREFIX.plugin}kanban`;
+    const kanbanSettings = `${KEY_PREFIX.settings}kanban/config`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    b.engine.store.group(id)!.exclude = [kanban];
+    a.memory.state.set(kanban, plugin("1"));
+    a.memory.state.set(kanbanSettings, { values: { x: 1 } });
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.has(kanban)).toBe(false);
+    expect(b.memory.state.has(kanbanSettings)).toBe(false);
+    expect(b.engine.view(b.engine.store.group(id)!).pending).toBe(0);
+
+    // B installe sa propre version : elle reste locale.
+    b.memory.state.set(kanban, plugin("0-local"));
+    await rounds([b, a], id, 2);
+    expect(a.memory.state.get(kanban)).toEqual(plugin("1"));
+    const item = a.engine.view(a.engine.store.group(id)!).itemStatus.find((entry) => entry.key === kanban)!;
+    expect(item.excluded).toEqual(["b"]);
+    expect(item.ok).toEqual(["a"]);
+  });
+
+  it("mode approbation : rien n'est appliqué sans accord ; un refus tient jusqu'à la version suivante", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    const gb = b.engine.store.group(id)!;
+    gb.approval = true;
+
+    a.memory.state.set(key, plugin("1"));
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.has(key)).toBe(false);
+    expect(b.engine.view(gb).awaiting.map((change) => change.key)).toEqual([key]);
+    expect(a.engine.view(a.engine.store.group(id)!).itemStatus.find((entry) => entry.key === key)!.awaiting).toEqual(["b"]);
+
+    expect(b.engine.decide(gb, "all", "approve")).toBe(1);
+    await rounds([b], id, 1);
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+    expect(b.engine.view(gb).awaiting).toHaveLength(0);
+
+    // Version 2 refusée : B reste en 1 et ne republie pas sa 1 par-dessus.
+    a.memory.state.set(key, plugin("2"));
+    await rounds([a, b], id, 2);
+    b.engine.decide(gb, [key], "reject");
+    await rounds([b, a], id, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+    expect(a.memory.state.get(key)).toEqual(plugin("2"));
+    expect(b.engine.view(gb).awaiting).toHaveLength(0);
+
+    // Version 3 : le refus de la 2 ne vaut plus, elle attend un nouvel accord.
+    a.memory.state.set(key, plugin("3"));
+    await rounds([a, b], id, 2);
+    expect(b.engine.view(gb).awaiting.map((change) => change.revision)).toEqual(["3"]);
+  });
+});
+
 describe("état par machine", () => {
   it("chaque machine voit ce qui est appliqué ou en échec chez les autres", async () => {
     const network = new Map<string, Node>();

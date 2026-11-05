@@ -64,6 +64,10 @@ export const ItemStatusSchema = z.object({
   unknown: z.array(z.string()),
   /** Machines « envoie seulement », qui n'appliquent rien. */
   notApplied: z.array(z.string()),
+  /** Machines qui ont exclu cet élément. */
+  excluded: z.array(z.string()),
+  /** Machines en mode approbation qui n'ont pas encore accepté ce changement. */
+  awaiting: z.array(z.string()),
 });
 export type ItemStatus = z.infer<typeof ItemStatusSchema>;
 
@@ -85,6 +89,16 @@ export const GroupViewSchema = z.object({
   shadowed: z.array(z.string()),
   machines: z.array(MachineStatusSchema),
   itemStatus: z.array(ItemStatusSchema),
+  /** Exclusions de cette machine. */
+  exclude: z.array(z.string()),
+  /** Mode approbation sur cette machine. */
+  approval: z.boolean(),
+  /** Changements reçus qui attendent l'accord de cette machine. */
+  awaiting: z.array(
+    z.object({ key: z.string(), deletion: z.boolean(), revision: z.string().nullable(), origin: z.string(), at: z.number() }),
+  ),
+  /** Clés dont la version actuelle a été refusée ici. */
+  rejected: z.array(z.string()),
 });
 export type GroupView = z.infer<typeof GroupViewSchema>;
 
@@ -140,6 +154,9 @@ export const groupUpdateRpc = defineRpc({
     scope: GroupScopeSchema.optional(),
     /** Monte (-1) ou descend (+1) le groupe : le premier groupe qui couvre un élément le gère. */
     move: z.union([z.literal(-1), z.literal(1)]).optional(),
+    /** Exclusions propres à cette machine. */
+    exclude: z.array(z.string()).optional(),
+    approval: z.boolean().optional(),
   }),
   output: ok,
 });
@@ -172,4 +189,14 @@ export const inviteDecodeRpc = defineRpc({
   name: "sync.invite.decode",
   input: z.object({ code: z.string() }),
   output: InviteSchema,
+});
+
+export const decideRpc = defineRpc({
+  name: "sync.group.decide",
+  input: z.object({
+    id: z.string(),
+    keys: z.union([z.array(z.string()), z.literal("all")]),
+    decision: z.enum(["approve", "reject"]),
+  }),
+  output: z.object({ count: z.number() }),
 });

@@ -1,4 +1,4 @@
-import { DEFAULT_SCOPE, GroupScopeSchema, KEY_PREFIX, SCOPE_KEY, keyInScope, type GroupScope } from "../shared/model";
+import { DEFAULT_SCOPE, GroupScopeSchema, KEY_PREFIX, SCOPE_KEY, keyInScope, matchesExclusion, type GroupScope } from "../shared/model";
 import type { GroupView, StatusView } from "../shared/rpc";
 import type { Collector } from "./collectors";
 import { groupKeys, hashValue, type GroupKeys } from "./crypto";
@@ -52,6 +52,12 @@ export interface EngineDeps {
 const RECENT_MAX = 40;
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const versionOf = (entry: Entry) => `${entry.t}.${entry.o}.${entry.h}`;
+
+/** Révision d'une valeur de plugin (commit ou version npm), pour l'affichage. */
+function revisionOf(value: Json): string | null {
+  if (value && typeof value === "object" && !Array.isArray(value) && typeof value.revision === "string") return value.revision;
+  return null;
+}
 
 function parseVersion(version: string): Pick<Entry, "t" | "o" | "h"> | null {
   const [t, o, h] = version.split(".");
@@ -167,6 +173,8 @@ export class Engine {
         delete group.baseline[key];
         continue;
       }
+      // Exclu sur cette machine : ce qui s'y passe reste local.
+      if (matchesExclusion(group.exclude, key)) continue;
       // Absent du relevé sans être supprimé (lu pendant une écriture, trop gros…) : rien à publier ce coup-ci.
       if (!local.has(key) && this.collectorFor(key)?.uncertain?.(key)) continue;
       const value = local.get(key) ?? null;
@@ -209,13 +217,15 @@ export class Engine {
     const wanted = new Map<string, Entry>();
     for (const [key, entry] of Object.entries(group.entries)) {
       if (key === SCOPE_KEY || !keyInScope(scope, key) || !this.owned(group, key)) continue;
-      if (this.ignored(key)) continue;
+      if (this.ignored(key) || matchesExclusion(group.exclude, key)) continue;
       const base = group.baseline[key];
       if (entry.h === base) continue;
       if (base === undefined && entry.v === null) {
         group.baseline[key] = entry.h;
         continue;
       }
+      if (group.rejected[key] === entry.h) continue;
+      if (group.approval && group.approved[key] !== entry.h) continue;
       const attempt = group.attempts[key];
       if (attempt && attempt.h === entry.h && now - attempt.at < backoffMs(attempt.count)) continue;
       wanted.set(key, { ...entry });
@@ -258,6 +268,7 @@ export class Engine {
         error = errors.get(key) ?? null;
         if (obtained === entry.h && error === null) {
           delete group.attempts[key];
+          delete group.approved[key];
           this.activity(group, key, entry.v === null ? "deleted" : "applied", entry.o);
         } else {
           const previous = group.attempts[key];
@@ -275,8 +286,50 @@ export class Engine {
     if (group.mode === "send") return [];
     const scope = this.scopeOf(group);
     return Object.entries(group.entries)
-      .filter(([key, entry]) => key !== SCOPE_KEY && keyInScope(scope, key) && this.owned(group, key) && !this.ignored(key) && entry.h !== group.baseline[key])
+      .filter(
+        ([key, entry]) =>
+          key !== SCOPE_KEY &&
+          keyInScope(scope, key) &&
+          this.owned(group, key) &&
+          !this.ignored(key) &&
+          !matchesExclusion(group.exclude, key) &&
+          group.rejected[key] !== entry.h &&
+          entry.h !== group.baseline[key] &&
+          !(group.baseline[key] === undefined && entry.v === null),
+      )
       .map(([key]) => key);
+  }
+
+  /** Changements reçus qui attendent l'accord de cette machine (mode approbation). */
+  awaitingKeys(group: GroupState): string[] {
+    if (!group.approval) return [];
+    return this.pendingKeys(group).filter((key) => group.approved[key] !== group.entries[key]?.h);
+  }
+
+  /** Accord ou refus de changements en attente (mode approbation). */
+  decide(group: GroupState, keys: string[] | "all", decision: "approve" | "reject"): number {
+    const targets = keys === "all" ? this.awaitingKeys(group) : keys;
+    let count = 0;
+    for (const key of targets) {
+      const entry = group.entries[key];
+      if (!entry) continue;
+      if (decision === "approve") {
+        group.approved[key] = entry.h;
+        delete group.rejected[key];
+      } else {
+        group.rejected[key] = entry.h;
+        delete group.approved[key];
+      }
+      count += 1;
+    }
+    return count;
+  }
+
+  /** Les accords et refus portent sur une version : une version plus récente les rend caducs. */
+  private pruneDecisions(group: GroupState): void {
+    for (const map of [group.approved, group.rejected]) {
+      for (const [key, hash] of Object.entries(map)) if (group.entries[key]?.h !== hash) delete map[key];
+    }
   }
 
   /** Le compte rendu de cette machine, recalculé à chaque envoi pour rester à jour. */
@@ -305,6 +358,8 @@ export class Engine {
       pendingTotal: pending.length,
       pending: pending.slice(0, REPORT_LIMIT),
       errors,
+      excluded: group.exclude.slice(0, REPORT_LIMIT),
+      awaiting: this.awaitingKeys(group).slice(0, REPORT_LIMIT),
     };
     group.reports[this.nodeId] = report;
     return report;
@@ -495,6 +550,7 @@ export class Engine {
       group.forgottenBefore = Math.max(group.forgottenBefore, pruneTombstones(group.entries, now));
       pruneMembers(group.members, now, this.nodeId);
       for (const nodeId of Object.keys(group.reports)) if (!group.members[nodeId]) delete group.reports[nodeId];
+      this.pruneDecisions(group);
       this.refreshReport(group);
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
@@ -539,15 +595,24 @@ export class Engine {
         continue;
       }
       if (entry.v !== null) items += 1;
-      if (group.mode !== "send" && entry.h !== group.baseline[key]) pending += 1;
     }
+    pending = this.pendingKeys(group).length;
     const problems = Object.entries(group.attempts)
       .filter(([, attempt]) => attempt.error)
       .map(([key, attempt]) => ({ key, error: attempt.error ?? "", at: attempt.at }));
     const { machines, itemStatus } = this.statusByMachine(group);
+    const labelOf = (nodeId: string) => group.members[nodeId]?.label ?? nodeId;
+    const awaiting = this.awaitingKeys(group).map((key) => {
+      const entry = group.entries[key]!;
+      return { key, deletion: entry.v === null, revision: revisionOf(entry.v), origin: labelOf(entry.o), at: entry.t };
+    });
     return {
       id: group.id,
       name: group.name,
+      exclude: group.exclude,
+      approval: group.approval,
+      awaiting,
+      rejected: Object.keys(group.rejected),
       machines,
       itemStatus,
       mode: group.mode,
@@ -596,7 +661,7 @@ export class Engine {
     }
 
     const itemStatus = [...items].map(([id, keys]) => {
-      const status = { key: id, count: keys.length, ok: [] as string[], pending: [] as string[], errors: [] as Array<{ machine: string; message: string }>, unknown: [] as string[], notApplied: [] as string[] };
+      const status = { key: id, count: keys.length, ok: [] as string[], pending: [] as string[], errors: [] as Array<{ machine: string; message: string }>, unknown: [] as string[], notApplied: [] as string[], excluded: [] as string[], awaiting: [] as string[] };
       for (const [nodeId, member] of members) {
         const report = nodeId === this.nodeId ? own : group.reports[nodeId];
         if (!report) {
@@ -607,9 +672,17 @@ export class Engine {
           status.notApplied.push(member.label);
           continue;
         }
+        if (keys.every((key) => matchesExclusion(report.excluded, key))) {
+          status.excluded.push(member.label);
+          continue;
+        }
         const failed = keys.find((key) => report.errors[key] !== undefined);
         if (failed) {
           status.errors.push({ machine: member.label, message: report.errors[failed]! });
+          continue;
+        }
+        if (keys.some((key) => report.awaiting.includes(key))) {
+          status.awaiting.push(member.label);
           continue;
         }
         if (keys.some((key) => report.pending.includes(key))) {

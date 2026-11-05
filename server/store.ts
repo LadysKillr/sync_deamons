@@ -45,6 +45,13 @@ export const GroupStateSchema = z.object({
   createdAt: z.number(),
   /** Vrai tant qu'une machine qui a rejoint n'a pas encore fait son premier échange réussi. */
   joining: z.boolean(),
+  /** Exclusions propres à cette machine (voir matchesExclusion) : ni appliquées ni publiées ici. */
+  exclude: z.array(z.string()).default([]),
+  /** Mode approbation : les changements reçus attendent un accord explicite avant d'être appliqués ici. */
+  approval: z.boolean().default(false),
+  /** Versions (empreintes) approuvées ou refusées, par clé. */
+  approved: z.record(z.string(), z.string()).default({}),
+  rejected: z.record(z.string(), z.string()).default({}),
   /** Heure de la plus récente trace de suppression oubliée ici : horizon d'oubli (voir Engine.admissible). */
   forgottenBefore: z.number().default(0),
   entries: z.record(z.string(), EntrySchema),
@@ -145,6 +152,10 @@ export function newGroupState(input: {
     createdAt: input.now,
     joining: input.peers.length > 0,
     forgottenBefore: 0,
+    exclude: [],
+    approval: false,
+    approved: {},
+    rejected: {},
     entries: {},
     baseline: {},
     attempts: {},

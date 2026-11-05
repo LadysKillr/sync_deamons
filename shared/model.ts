@@ -118,3 +118,16 @@ export function keyInScope(scope: GroupScope, key: string): boolean {
       return false;
   }
 }
+
+/**
+ * Exclusions propres à une machine : une clé exacte (`config/agents`), un préfixe (`file/skills` : tout l'ensemble),
+ * et un plugin exclu emporte ses réglages (`plugin/kanban` exclut aussi `settings/kanban/…`).
+ */
+export function matchesExclusion(patterns: readonly string[], key: string): boolean {
+  return patterns.some(
+    (pattern) =>
+      key === pattern ||
+      key.startsWith(`${pattern}/`) ||
+      (pattern.startsWith(KEY_PREFIX.plugin) && key.startsWith(`${KEY_PREFIX.settings}${pattern.slice(KEY_PREFIX.plugin.length)}/`)),
+  );
+}

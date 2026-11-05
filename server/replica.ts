@@ -44,6 +44,9 @@ export const ReportSchema = z.object({
   pendingTotal: z.number().int().nonnegative(),
   pending: z.array(z.string().max(500)).max(REPORT_LIMIT),
   errors: z.record(z.string().max(500), z.string().max(500)),
+  /** Exclusions de la machine et changements en attente de son accord (absents avant 0.2.0). */
+  excluded: z.array(z.string().max(500)).max(REPORT_LIMIT).default([]),
+  awaiting: z.array(z.string().max(500)).max(REPORT_LIMIT).default([]),
 });
 export type Report = z.infer<typeof ReportSchema>;
 export type Reports = Record<string, Report>;
