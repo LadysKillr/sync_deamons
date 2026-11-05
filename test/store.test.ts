@@ -16,7 +16,7 @@ describe("passage à 0.2.0", () => {
   it("l'ancien défaut d'écoute devient « auto », une adresse choisie est gardée, la paire de clés est créée", () => {
     for (const [before, after] of [
       ["0.0.0.0", "auto"],
-      ["100.72.0.9", "100.72.0.9"],
+      ["100.64.0.9", "100.64.0.9"],
     ] as const) {
       const dir = mkdtempSync(path.join(tmpdir(), "psync-store-"));
       writeFileSync(path.join(dir, "state.json"), oldState(before));
