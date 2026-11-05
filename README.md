@@ -75,3 +75,7 @@ paseo plugin logs sync
 Layout: `shared/` holds the contracts and model, `server/` the daemon side (crypto, replica, engine, collectors, HTTP transport) and `client/` the React Native UI. Tests are in `test/`.
 
 Requires Paseo >= 0.15.0.
+
+## License
+
+[MIT](LICENSE) © 2026 LadysKillr. Free to use, modify and redistribute, keeping the copyright notice.

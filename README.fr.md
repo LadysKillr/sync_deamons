@@ -57,3 +57,7 @@ npm test
 paseo plugin install "$PWD"      # puis paseo plugin reload sync après modification
 paseo plugin logs sync
 ```
+
+## Licence
+
+[MIT](LICENSE) © 2026 LadysKillr. Libre d'utilisation, de modification et de redistribution, en gardant la mention de copyright.
