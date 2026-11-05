@@ -269,8 +269,24 @@ export class Engine {
       const value = local.get(key) ?? null;
       const hash = hashValue(value);
       const base = group.baseline[key];
-      if (base === hash) continue;
       const entry = group.entries[key];
+      if (entry && entry.h === hash) delete group.attempts[key];
+      // Version locale plus récente que celle du groupe (Sync lui-même) : elle repart, même sans changement ici.
+      if (
+        value !== null &&
+        entry &&
+        entry.v !== null &&
+        entry.h !== hash &&
+        group.mode !== "receive" &&
+        this.collectorFor(key)?.preferLocal?.(key, value, entry.v)
+      ) {
+        this.publish(group, key, value);
+        group.baseline[key] = hash;
+        delete group.attempts[key];
+        this.activity(group, key, "published", this.nodeId);
+        continue;
+      }
+      if (base === hash) continue;
       if (base === undefined) {
         // Élément que cette machine n'avait jamais suivi : la valeur du groupe l'emporte si elle existe.
         if (value === null) continue;
@@ -333,6 +349,7 @@ export class Engine {
         this.quietUntil = Date.now() + 4000;
       }
       const errors = new Map(outcomes.map((outcome) => [outcome.key, outcome.error]));
+      const deferred = new Set(outcomes.filter((outcome) => outcome.deferred).map((outcome) => outcome.key));
       // État réellement obtenu : il devient la nouvelle référence locale.
       let after: Map<string, Json>;
       try {
@@ -343,6 +360,13 @@ export class Engine {
       }
       for (const { key } of changes) {
         const entry = wanted.get(key)!;
+        if (deferred.has(key)) {
+          // Lancé, pas encore fait : on attend (sans échec) avant de relancer ; la référence locale ne bouge pas.
+          const previous = group.attempts[key];
+          const count = previous && previous.h === entry.h ? previous.count + 1 : 1;
+          group.attempts[key] = { h: entry.h, at: this.clock.now(), error: null, count };
+          continue;
+        }
         let error = errors.get(key) ?? null;
         if (!after.has(key) && collector.uncertain?.(key)) {
           // État illisible juste après l'écriture : la référence ne bouge pas, on réessaiera plus tard.

@@ -1,11 +1,12 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SCOPE, KEY_PREFIX, keyInScope, type GroupScope } from "../shared/model";
 import type { ApplyOutcome, Change, Collector } from "../server/collectors";
 import { aad, deriveMasterKey, groupKeys, open, seal, type GroupKeys } from "../server/crypto";
 import { Engine } from "../server/engine";
+import { SELF_UPDATE_DELAY_MS, SelfCollector } from "../server/self-update";
 import { HybridClock, concurrent, mergeEntries, type Entries, type Json } from "../server/replica";
 import { Store, newGroupState } from "../server/store";
 import { RequestSchema, ResponseSchema, sendRequest, startServer, type SyncRequest, type SyncResponse } from "../server/transport";
@@ -48,7 +49,7 @@ interface Node {
   url: string;
 }
 
-function makeNode(name: string, network: Map<string, Node>): Node {
+function makeNode(name: string, network: Map<string, Node>, extra: Collector[] = []): Node {
   const store = new Store(mkdtempSync(path.join(tmpdir(), `psync-${name}-`)));
   store.data.node.label = name;
   const memory = new MemoryCollector();
@@ -66,7 +67,7 @@ function makeNode(name: string, network: Map<string, Node>): Node {
     const sealed = seal(peerKeys, response, aad("res", peerKeys.groupId, envelope.n));
     return ResponseSchema.parse(open(keys, sealed, aad("res", keys.groupId, envelope.n)));
   };
-  const engine = new Engine({ store, collectors: [memory], send, selfUrl: () => url, log: () => undefined, clock: new HybridClock(() => wall) });
+  const engine = new Engine({ store, collectors: [...extra, memory], send, selfUrl: () => url, log: () => undefined, clock: new HybridClock(() => wall) });
   const node = { engine, memory, url };
   network.set(url, node);
   return node;
@@ -446,6 +447,70 @@ describe("historique et conflits", () => {
     await rounds([a, b], id, 2);
     expect(b.memory.state.get(key)).toEqual({ from: "a" });
     expect(a.engine.view(ga).conflicts).toHaveLength(0);
+  });
+});
+
+describe("mise à jour de Sync lui-même", () => {
+  /** Un Sync installé depuis git, dans une version et à une révision données, dont on peut simuler la mise à jour. */
+  function fakeSelf(version: string, revision: string) {
+    const installed = { version, revision };
+    const launched: string[][] = [];
+    const collector = new SelfCollector({
+      cli: { run: async () => ({ code: 0, stdout: "", stderr: "" }) },
+      list: async () => [
+        {
+          id: "sync",
+          enabled: true,
+          installation: { identity: { kind: "git", remote: "https://github.com/x/sync.git", pluginPath: "." }, currentRevision: installed.revision },
+        },
+      ],
+      paseoHome: "/nulle-part",
+      dataDir: mkdtempSync(path.join(tmpdir(), "psync-self-")),
+      log: () => undefined,
+      version,
+      launch: (args) => launched.push(args),
+    });
+    return { collector, installed, launched };
+  }
+
+  it("suit la version du groupe, refuse de revenir en arrière, et une version plus récente devient la référence", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const network = new Map<string, Node>();
+      const selfA = fakeSelf("0.2.1", "rev-a");
+      const selfB = fakeSelf("0.2.0", "rev-b");
+      const a = makeNode("a", network, [selfA.collector]);
+      const b = makeNode("b", network, [selfB.collector]);
+      const id = await addGroup(a, [], { create: true });
+      a.engine.setScope(a.engine.store.group(id)!, { ...DEFAULT_SCOPE, selfUpdate: true });
+      await addGroup(b, [a.url], { create: false });
+      await rounds([a, b], id, 2);
+      vi.advanceTimersByTime(SELF_UPDATE_DELAY_MS);
+
+      // B (plus ancien) lance sa mise à jour vers la révision de A ; A ne bouge pas.
+      expect(selfB.launched).toEqual([["plugin", "update", "sync", "--ref", "rev-a"]]);
+      expect(selfA.launched).toEqual([]);
+      expect(b.engine.view(b.engine.store.group(id)!).problems).toEqual([]);
+
+      // B redémarre dans la nouvelle version : plus rien à faire, rien d'autre de lancé.
+      selfB.installed.revision = "rev-a";
+      await rounds([b, a], id, 3);
+      vi.advanceTimersByTime(SELF_UPDATE_DELAY_MS);
+      expect(selfB.launched).toHaveLength(1);
+      expect(b.engine.view(b.engine.store.group(id)!).pending).toBe(0);
+
+      // C arrive avec une version plus récente : elle devient celle du groupe, A et B la suivent.
+      const selfC = fakeSelf("0.3.0", "rev-c");
+      const c = makeNode("c", network, [selfC.collector]);
+      await addGroup(c, [a.url], { create: false });
+      await rounds([c, a, b], id, 3);
+      vi.advanceTimersByTime(SELF_UPDATE_DELAY_MS);
+      expect(selfC.launched).toEqual([]);
+      expect(selfA.launched.at(-1)).toEqual(["plugin", "update", "sync", "--ref", "rev-c"]);
+      expect((a.engine.store.group(id)!.entries["self/sync"]!.v as { version: string }).version).toBe("0.3.0");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

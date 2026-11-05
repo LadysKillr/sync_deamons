@@ -20,6 +20,8 @@ export interface Change {
 export interface ApplyOutcome {
   key: string;
   error: string | null;
+  /** Application lancée mais pas terminée (mise à jour de Sync lui-même) : ni réussite ni échec pour l'instant. */
+  deferred?: boolean;
 }
 
 export interface Collector {
@@ -35,6 +37,8 @@ export interface Collector {
   uncertain?(key: string): boolean;
   /** Clé que ce collecteur ne synchronise jamais (fichier temporaire) : oubliée, sans suppression publiée. */
   ignores?(key: string): boolean;
+  /** La valeur locale doit l'emporter sur celle du groupe, même si cette machine n'a rien changé (version plus récente). */
+  preferLocal?(key: string, local: Json, group: Json): boolean;
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -43,7 +47,7 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 // Plugins
 // ---------------------------------------------------------------------------------------------------------------
 
-interface RawPlugin {
+export interface RawPlugin {
   id: string;
   name?: string;
   enabled: boolean;

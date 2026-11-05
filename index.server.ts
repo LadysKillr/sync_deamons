@@ -24,6 +24,7 @@ import { createPaseoCli } from "./server/cli";
 import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollector } from "./server/collectors";
 import { deriveMasterKey, groupKeys, normalizeGroupName } from "./server/crypto";
 import { Engine } from "./server/engine";
+import { SelfCollector } from "./server/self-update";
 import { Store, newGroupState } from "./server/store";
 import { ChangeWatcher, watchTargets } from "./server/watcher";
 import { expandHome } from "./server/collectors";
@@ -49,6 +50,8 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     new PluginSettingsCollector(cli, options.paseoHome, runningPlugins),
     new ConfigCollector(cli, options.paseoHome),
     new FilesCollector(log, options.home ?? homedir()),
+    // En dernier : la mise à jour de Sync l'arrête, le reste doit être appliqué avant.
+    new SelfCollector({ cli, list: () => plugins.list(), paseoHome: options.paseoHome, dataDir: options.dataDir, log }),
   ];
 
   let listening: ListeningServer | null = null;

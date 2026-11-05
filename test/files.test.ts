@@ -112,3 +112,19 @@ describe("membres", () => {
     expect(Object.keys(members)).toEqual(["n1"]);
   });
 });
+
+import { readFileSync as readText } from "node:fs";
+import { SYNC_VERSION } from "../shared/version";
+import { compareVersions } from "../shared/model";
+
+describe("version", () => {
+  it("la version annoncée par Sync est celle de package.json", () => {
+    const pkg = JSON.parse(readText(path.join(__dirname, "..", "package.json"), "utf8")) as { version: string };
+    expect(SYNC_VERSION).toBe(pkg.version);
+  });
+  it("compare les versions", () => {
+    expect(compareVersions("0.2.0", "0.10.0")).toBeLessThan(0);
+    expect(compareVersions("1.0.0", "1.0.0-beta")).toBe(0);
+    expect(compareVersions("0.3.1", "0.3.0")).toBeGreaterThan(0);
+  });
+});

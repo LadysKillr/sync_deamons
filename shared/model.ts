@@ -17,7 +17,11 @@ export const KEY_PREFIX = {
   settings: "settings/",
   config: "config/",
   file: "file/",
+  self: "self/",
 } as const;
+
+/** Clé de la version de Sync lui-même (mise à jour automatique). */
+export const SELF_KEY = "self/sync";
 
 /** Clé réservée : la portée du groupe voyage comme un élément ordinaire. */
 export const SCOPE_KEY = "@scope";
@@ -45,6 +49,10 @@ export const GroupScopeSchema = z.object({
   files: z.object({ enabled: z.boolean(), sets: z.array(FileSetSchema) }),
   /** Une suppression sur une machine supprime aussi sur les autres. */
   propagateDeletions: z.boolean(),
+  /** Sync se met à jour lui-même sur toutes les machines (absent avant 0.2.0 : non). */
+  selfUpdate: z.boolean().default(false),
+  /** Une machine vérifie les nouvelles versions des plugins retenus et les installe ; le groupe suit. */
+  autoUpdatePlugins: z.boolean().default(false),
 });
 export type GroupScope = z.infer<typeof GroupScopeSchema>;
 
@@ -56,6 +64,8 @@ export const DEFAULT_SCOPE: GroupScope = {
   config: { enabled: true, paths: [...DEFAULT_CONFIG_PATHS] },
   files: { enabled: false, sets: [] },
   propagateDeletions: true,
+  selfUpdate: false,
+  autoUpdatePlugins: false,
 };
 
 /**
@@ -84,8 +94,9 @@ export function pluginInScope(scope: GroupScope, pluginId: string): boolean {
   return !ids.includes(pluginId);
 }
 
-export function categoryOfKey(key: string): "plugins" | "pluginSettings" | "config" | "files" | "scope" | null {
+export function categoryOfKey(key: string): "plugins" | "pluginSettings" | "config" | "files" | "scope" | "self" | null {
   if (key === SCOPE_KEY) return "scope";
+  if (key === SELF_KEY) return "self";
   if (key.startsWith(KEY_PREFIX.plugin)) return "plugins";
   if (key.startsWith(KEY_PREFIX.settings)) return "pluginSettings";
   if (key.startsWith(KEY_PREFIX.config)) return "config";
@@ -98,6 +109,8 @@ export function keyInScope(scope: GroupScope, key: string): boolean {
   switch (categoryOfKey(key)) {
     case "scope":
       return true;
+    case "self":
+      return scope.selfUpdate;
     case "plugins":
       return scope.plugins.enabled && pluginInScope(scope, key.slice(KEY_PREFIX.plugin.length));
     case "pluginSettings": {
@@ -130,4 +143,15 @@ export function matchesExclusion(patterns: readonly string[], key: string): bool
       key.startsWith(`${pattern}/`) ||
       (pattern.startsWith(KEY_PREFIX.plugin) && key.startsWith(`${KEY_PREFIX.settings}${pattern.slice(KEY_PREFIX.plugin.length)}/`)),
   );
+}
+
+/** Compare deux versions « x.y.z » (le suffixe éventuel est ignoré) : négatif si a < b. */
+export function compareVersions(a: string, b: string): number {
+  const parts = (version: string) => version.split("-")[0]!.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+    const diff = (x[i] ?? 0) - (y[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
