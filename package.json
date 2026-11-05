@@ -1,7 +1,7 @@
 {
   "name": "paseo-sync",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Plugin Paseo : synchronisation chiffrée et bidirectionnelle entre daemons (plugins, versions, réglages, agents, fichiers), par groupes.",
   "files": [
     "paseo-plugin.json",

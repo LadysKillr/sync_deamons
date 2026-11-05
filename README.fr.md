@@ -34,7 +34,8 @@ Les machines doivent se joindre en HTTP sur le port 6780 (réglable). Par défau
 ## Fonctionnement
 
 - **Réplique** par groupe : la dernière valeur de chaque élément, datée par une horloge hybride (LWW, la plus récente gagne ; suppression = pierre tombale gardée 30 jours).
-- Chaque passage (30 s par défaut, et aussitôt après une réception) : relevé local → publication de ce qui a changé ici → échange `pull`/`push` (deltas seulement) avec chaque membre → application ici de ce qui a changé ailleurs.
+- **Détection des changements** : Sync surveille sur disque tout ce qu'il synchronise (`config.json`, `plugins/sources.json`, `plugin-settings/**`, les ensembles de fichiers) et lance un passage environ 2 s après un changement local. Les rafales d'écritures sont regroupées, et ses propres écritures, pendant qu'il applique un changement venu d'ailleurs, sont ignorées. Un **passage de secours toutes les 10 min** (réglable) rattrape les membres revenus en ligne, les nouvelles tentatives et un éventuel événement manqué. Bouton **Synchroniser maintenant**.
+- Chaque passage (changement local, réception, secours ou bouton) : relevé local → publication de ce qui a changé ici → échange `pull`/`push` (deltas seulement) avec chaque membre → application ici de ce qui a changé ailleurs.
 - Après une application, l'état **réellement obtenu** devient la référence : l'effet d'un échec (plugin retiré mais pas réinstallé) n'est jamais publié comme un choix. Les échecs sont réessayés (30 s, 1 min, 2 min… 1 h) et affichés.
 - Une machine qui **rejoint** attend un premier contact, adopte l'état du groupe, puis apporte ce qu'elle a en plus.
 - Plugins du registre : réinstallés par le registre (fiche conservée) ; si sa révision revue ne correspond pas, réinstallation depuis la source directe à la révision exacte. Les réglages sont sauvegardés autour d'une réinstallation (`plugin remove` les efface).

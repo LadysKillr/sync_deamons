@@ -9,6 +9,8 @@ import { EntrySchema, MemberSchema } from "./replica";
 /** Tout l'état du plugin sur cette machine : `<PASEO_HOME>/plugin-data/sync/state.json`, mode 0600. */
 
 export const DEFAULT_PORT = 6780;
+/** Passage de secours : 10 min. */
+export const DEFAULT_INTERVAL_SEC = 600;
 
 export const NodeConfigSchema = z.object({
   nodeId: z.string(),
@@ -16,7 +18,9 @@ export const NodeConfigSchema = z.object({
   listenHost: z.string(),
   port: z.number().int(),
   advertiseUrl: z.string().nullable(),
+  /** Passage de secours (s) ; les changements locaux sont détectés à part, aussitôt. */
   intervalSec: z.number().int(),
+  watch: z.boolean().default(true),
 });
 export type NodeConfig = z.infer<typeof NodeConfigSchema>;
 
@@ -63,7 +67,8 @@ export function defaultNode(): NodeConfig {
     listenHost: "0.0.0.0",
     port: DEFAULT_PORT,
     advertiseUrl: null,
-    intervalSec: 30,
+    intervalSec: DEFAULT_INTERVAL_SEC,
+    watch: true,
   };
 }
 
@@ -89,7 +94,10 @@ export class Store {
       }
       throw error;
     }
-    const parsed = StoreFileSchema.safeParse(JSON.parse(raw));
+    const json = JSON.parse(raw) as { node?: { watch?: unknown; intervalSec?: unknown } };
+    // 0.1.1 et avant : pas de détection de changements, passage toutes les 30 s. On passe au secours de 10 min.
+    if (json.node && json.node.watch === undefined && json.node.intervalSec === 30) json.node.intervalSec = DEFAULT_INTERVAL_SEC;
+    const parsed = StoreFileSchema.safeParse(json);
     if (!parsed.success) {
       // On garde une copie du fichier illisible plutôt que de l'écraser en silence.
       const backup = `${this.file}.corrupt-${Date.now()}`;

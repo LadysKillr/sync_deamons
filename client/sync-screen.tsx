@@ -83,6 +83,7 @@ export function SyncScreen({ theme, layout }: PluginSurfaceProps) {
         dans les deux sens.
       </Text>
       {loadError ? <Text style={s.danger}>{loadError}</Text> : null}
+      {view && view.groups.length > 0 ? <SyncAllButton s={s} onDone={refresh} /> : null}
       {view ? (
         <>
           <NodeSection s={s} view={view} onChanged={refresh} />
@@ -98,6 +99,21 @@ export function SyncScreen({ theme, layout }: PluginSurfaceProps) {
   );
 }
 
+function SyncAllButton({ s, onDone }: { s: Styles; onDone(): void }) {
+  const syncNow = useRpc(syncNowRpc);
+  const [doneAt, setDoneAt] = useState<number | null>(null);
+  const action = useAction(() => {
+    setDoneAt(Date.now());
+    onDone();
+  });
+  return (
+    <View style={s.row}>
+      <Button s={s} kind="primary" label={action.busy ? "Synchronisation…" : "Synchroniser maintenant"} disabled={action.busy} onPress={() => action.run(() => syncNow({}))} />
+      {action.error ? <Text style={s.danger}>{action.error}</Text> : doneAt ? <Text style={s.success}>Fait {ago(doneAt)}</Text> : null}
+    </View>
+  );
+}
+
 function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onChanged(): void }) {
   const update = useRpc(nodeUpdateRpc);
   const { node } = view;
@@ -106,7 +122,8 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
   const [port, setPort] = useState(String(node.port));
   const [listenHost, setListenHost] = useState(node.listenHost);
   const [advertise, setAdvertise] = useState(node.advertiseUrl ?? "");
-  const [interval, setIntervalSec] = useState(String(node.intervalSec));
+  const [interval, setIntervalMin] = useState(String(Math.round(node.intervalSec / 60)));
+  const [watch, setWatch] = useState(node.watch);
   const action = useAction(() => {
     setEditing(false);
     onChanged();
@@ -121,7 +138,10 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
         {node.listening ? `À l'écoute sur ${node.listenHost}:${node.port}` : `Pas à l'écoute : ${node.listenError ?? "démarrage…"}`}
       </Text>
       <Text style={s.muted}>
-        Passage toutes les {node.intervalSec} s. Les autres machines doivent pouvoir joindre l'adresse ci-dessus (Tailscale, réseau local, VPN…).
+        {node.watch
+          ? `Changements détectés aussitôt (${node.watching} dossiers surveillés), passage de secours toutes les ${Math.round(node.intervalSec / 60)} min.`
+          : `Détection des changements coupée : passage toutes les ${Math.round(node.intervalSec / 60)} min.`}{" "}
+        Les autres machines doivent pouvoir joindre l'adresse ci-dessus (Tailscale, réseau local, VPN…).
       </Text>
       {editing ? (
         <View style={{ gap: 10 }}>
@@ -132,8 +152,9 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
           </View>
           <View style={s.row}>
             <Field s={s} label="Adresse annoncée (vide = automatique)" value={advertise} onChange={setAdvertise} placeholder="http://100.x.y.z:6780" />
-            <Field s={s} label="Intervalle (s)" value={interval} onChange={setIntervalSec} />
+            <Field s={s} label="Passage de secours (min)" value={interval} onChange={setIntervalMin} />
           </View>
+          <Toggle s={s} label="Détecter les changements aussitôt" value={watch} onChange={setWatch} />
           {action.error ? <Text style={s.danger}>{action.error}</Text> : null}
           <View style={s.row}>
             <Button
@@ -148,7 +169,8 @@ function NodeSection({ s, view, onChanged }: { s: Styles; view: StatusView; onCh
                     listenHost: listenHost.trim() || undefined,
                     port: Number(port) || undefined,
                     advertiseUrl: advertise.trim() ? advertise.trim() : null,
-                    intervalSec: Number(interval) || undefined,
+                    intervalSec: Number(interval) > 0 ? Math.round(Number(interval) * 60) : undefined,
+                    watch,
                   }),
                 )
               }

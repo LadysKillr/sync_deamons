@@ -13,6 +13,8 @@ export const NodeViewSchema = z.object({
   listening: z.boolean(),
   listenError: z.string().nullable(),
   intervalSec: z.number(),
+  watch: z.boolean(),
+  watching: z.number(),
 });
 export type NodeView = z.infer<typeof NodeViewSchema>;
 
@@ -77,7 +79,8 @@ export const nodeUpdateRpc = defineRpc({
     listenHost: z.string().min(1).optional(),
     port: z.number().int().min(1).max(65535).optional(),
     advertiseUrl: z.string().url().nullable().optional(),
-    intervalSec: z.number().int().min(5).max(3600).optional(),
+    intervalSec: z.number().int().min(10).max(86400).optional(),
+    watch: z.boolean().optional(),
   }),
   output: ok,
 });

@@ -22,6 +22,8 @@ import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollec
 import { deriveMasterKey, groupKeys, normalizeGroupName } from "./server/crypto";
 import { Engine } from "./server/engine";
 import { Store, newGroupState } from "./server/store";
+import { ChangeWatcher, watchTargets } from "./server/watcher";
+import { expandHome } from "./server/collectors";
 import { guessAddress, sendRequest, startServer, type ListeningServer } from "./server/transport";
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -50,7 +52,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   let listenError: string | null = null;
   const selfUrl = () => store.data.node.advertiseUrl ?? `http://${guessAddress()}:${store.data.node.port}`;
 
-  const engine = new Engine({ store, collectors, send: sendRequest, selfUrl, log });
+  const engine = new Engine({ store, collectors, send: sendRequest, selfUrl, log, afterPass: () => rewatch() });
 
   const handler = {
     keysFor(groupId: string) {
@@ -75,11 +77,37 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   }
   void listen();
 
+  // Détection des changements locaux : un passage dès qu'un fichier suivi bouge.
+  const runAll = () => {
+    for (const group of store.data.groups) if (group.enabled) void engine.run(group.id);
+  };
+  const watcher = new ChangeWatcher(runAll, { paused: () => engine.isApplying(), log });
+  let watching = 0;
+  function rewatch() {
+    if (!store.data.node.watch || store.data.groups.length === 0) {
+      watcher.close();
+      watching = 0;
+      return;
+    }
+    const roots = store.data.groups.flatMap((group) => {
+      const scope = engine.scopeOf(group);
+      return scope.files.enabled ? scope.files.sets.map((set) => expandHome(set.path, options.home ?? homedir())) : [];
+    });
+    try {
+      const targets = watchTargets(options.paseoHome, [...new Set(roots)]);
+      watcher.update(targets);
+      watching = targets.length;
+    } catch (error) {
+      log(`surveillance : ${describe(error)}`);
+    }
+  }
+
   const nodeView = (): NodeView => ({
     ...store.data.node,
     effectiveUrl: selfUrl(),
     listening: listening !== null,
     listenError,
+    watching: store.data.node.watch ? watching : 0,
   });
 
   function handle<I extends ZodType, O extends ZodType>(contract: PluginRpcContract<I, O>, run: (input: ZodOutput<I>) => Promise<ZodInput<O>>): void {
@@ -101,6 +129,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     store.save();
     if (relisten) await listen();
     restartTimer();
+    rewatch();
     return { ok: true as const };
   });
 
@@ -116,6 +145,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     // Un nouveau groupe fixe sa portée ; une machine qui rejoint reçoit celle du groupe.
     if (peers.length === 0) engine.setScope(group, DEFAULT_SCOPE);
     store.save();
+    rewatch();
     void engine.run(groupId);
     return { id: groupId };
   });
@@ -133,6 +163,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
       if (target >= 0 && target < groups.length) [groups[index], groups[target]] = [groups[target]!, groups[index]!];
     }
     store.save();
+    rewatch();
     void engine.run(id);
     return { ok: true as const };
   });
@@ -140,6 +171,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   handle(groupRemoveRpc, async ({ id }) => {
     store.data.groups = store.data.groups.filter((group) => group.id !== id);
     store.save();
+    rewatch();
     return { ok: true as const };
   });
 
@@ -171,20 +203,25 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   let timer: ReturnType<typeof setInterval> | null = null;
   function restartTimer() {
     if (timer) clearInterval(timer);
+    // Passage de secours : membres revenus en ligne, nouvelles tentatives, événement manqué. Il repose aussi les
+    // surveillances (portée reçue d'un autre membre, dossier créé entre-temps).
     timer = setInterval(() => {
-      for (const group of store.data.groups) if (group.enabled) void engine.run(group.id);
+      rewatch();
+      runAll();
     }, store.data.node.intervalSec * 1000);
   }
   restartTimer();
   // Premier passage peu après le démarrage, le temps que le daemon finisse de charger les plugins.
   const first = setTimeout(() => {
-    for (const group of store.data.groups) if (group.enabled) void engine.run(group.id);
+    rewatch();
+    runAll();
   }, 5000);
 
   return async () => {
     clearTimeout(first);
     if (timer) clearInterval(timer);
     engine.stop();
+    watcher.close();
     if (listening) await listening.close();
   };
 }

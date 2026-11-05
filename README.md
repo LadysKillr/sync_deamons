@@ -40,7 +40,8 @@ Machines must be able to reach each other over HTTP on port **6780** (configurab
 ## How it works
 
 - **One replica per group**: the latest value of each item, timestamped with a hybrid logical clock. The most recent write wins (LWW). Deletions are tombstones kept for 30 days.
-- **Each pass** (every 30 s by default, and right after receiving changes):
+- **Change detection**: Sync watches everything it syncs on disk (`config.json`, `plugins/sources.json`, `plugin-settings/**` and the chosen file sets) and starts a pass about 2 s after a local change. Bursts of writes are coalesced, and Sync ignores its own writes while it applies remote changes. A **fallback pass runs every 10 minutes** (configurable) to catch members coming back online, retry failures and recover any missed event. There is also a **Sync now** button.
+- **Each pass** (on a local change, right after receiving changes, on the fallback timer or on demand):
   1. read local state and publish what changed on this machine;
   2. run a `pull`/`push` exchange with each member (deltas only);
   3. apply here what changed elsewhere.

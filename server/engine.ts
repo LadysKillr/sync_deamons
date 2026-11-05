@@ -28,6 +28,8 @@ export interface EngineDeps {
   selfUrl: () => string;
   log: (line: string) => void;
   clock?: HybridClock;
+  /** Appelé après chaque passage (par exemple pour reposer les surveillances si la portée a changé). */
+  afterPass?: () => void;
 }
 
 const RECENT_MAX = 40;
@@ -51,6 +53,14 @@ export class Engine {
   /** Un seul relevé ou une seule application à la fois sur la machine (les collecteurs touchent le même daemon). */
   private systemLock: Promise<unknown> = Promise.resolve();
   private running = new Map<string, Promise<void>>();
+  /** Applications en cours, et fin de la période où les écritures de Sync lui-même sont encore visibles. */
+  private applying = 0;
+  private quietUntil = 0;
+
+  /** Vrai pendant (et juste après) une application : la détection de changements ignore ses propres écritures. */
+  isApplying(): boolean {
+    return this.applying > 0 || Date.now() < this.quietUntil;
+  }
   private rerun = new Set<string>();
 
   constructor(private readonly deps: EngineDeps) {
@@ -182,7 +192,14 @@ export class Engine {
     for (const collector of this.deps.collectors) {
       const changes = [...wanted].filter(([key]) => collector.owns(key)).map(([key, entry]) => ({ key, value: entry.v }));
       if (changes.length === 0) continue;
-      const outcomes = await collector.apply(changes);
+      this.applying += 1;
+      let outcomes: Awaited<ReturnType<Collector["apply"]>>;
+      try {
+        outcomes = await collector.apply(changes);
+      } finally {
+        this.applying -= 1;
+        this.quietUntil = Date.now() + 4000;
+      }
       const errors = new Map(outcomes.map((outcome) => [outcome.key, outcome.error]));
       // État réellement obtenu : il devient la nouvelle référence locale.
       let after: Map<string, Json>;
@@ -356,6 +373,7 @@ export class Engine {
       this.deps.log(`groupe ${group.name} : ${group.lastError}`);
     } finally {
       this.store.save();
+      this.deps.afterPass?.();
     }
   }
 
