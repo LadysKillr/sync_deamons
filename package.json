@@ -1,0 +1,32 @@
+{
+  "name": "paseo-sync",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Plugin Paseo : synchronisation chiffrée et bidirectionnelle entre daemons (plugins, versions, réglages, agents, fichiers), par groupes.",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "README.md",
+    "README.fr.md",
+    "index.server.ts",
+    "index.client.tsx",
+    "server/",
+    "client/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.15.0",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/node": "^22.15.3",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,91 @@
+import { z } from "zod";
+
+/**
+ * Réplique d'un groupe : la dernière valeur connue de chaque élément, datée.
+ *
+ * Fusion « la plus récente gagne » (LWW) avec une horloge hybride : `t` est une heure en millisecondes qui ne recule
+ * jamais sur une machine et dépasse toujours la plus grande heure déjà vue, `o` la machine d'origine départage deux
+ * écritures à la même heure. Une suppression est une valeur `null` (pierre tombale) gardée `TOMBSTONE_TTL_MS`.
+ *
+ * La fusion est commutative, associative et idempotente : rejouer un échange ou recevoir deux fois la même réplique
+ * ne change rien.
+ */
+
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+export const EntrySchema = z.object({
+  v: z.json(),
+  h: z.string().max(64),
+  t: z.number().int().nonnegative(),
+  o: z.string().max(64),
+});
+export type Entry = { v: Json; h: string; t: number; o: string };
+export type Entries = Record<string, Entry>;
+
+export const MemberSchema = z.object({ label: z.string().max(120), url: z.string().max(500), seenAt: z.number().int().nonnegative() });
+export type Member = z.infer<typeof MemberSchema>;
+export type Members = Record<string, Member>;
+
+export const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000;
+/** Une machine muette depuis plus longtemps est oubliée de la liste des membres. */
+export const MEMBER_TTL_MS = 60 * 24 * 3600 * 1000;
+
+export function newer(a: Entry, b: Entry): boolean {
+  if (a.t !== b.t) return a.t > b.t;
+  if (a.o !== b.o) return a.o > b.o;
+  return a.h > b.h;
+}
+
+/** Fusionne `remote` dans `local` (modifié en place) ; renvoie les clés qui ont changé. */
+export function mergeEntries(local: Entries, remote: Entries): string[] {
+  const changed: string[] = [];
+  for (const [key, incoming] of Object.entries(remote)) {
+    const current = local[key];
+    if (current === undefined || newer(incoming, current)) {
+      local[key] = { v: incoming.v, h: incoming.h, t: incoming.t, o: incoming.o };
+      changed.push(key);
+    }
+  }
+  return changed;
+}
+
+export function mergeMembers(local: Members, remote: Members): void {
+  for (const [nodeId, incoming] of Object.entries(remote)) {
+    const current = local[nodeId];
+    if (current === undefined || incoming.seenAt > current.seenAt) local[nodeId] = { ...incoming };
+  }
+}
+
+export function maxTime(entries: Entries): number {
+  let max = 0;
+  for (const entry of Object.values(entries)) if (entry.t > max) max = entry.t;
+  return max;
+}
+
+export function pruneTombstones(entries: Entries, now: number): void {
+  for (const [key, entry] of Object.entries(entries)) {
+    if (entry.v === null && now - entry.t > TOMBSTONE_TTL_MS) delete entries[key];
+  }
+}
+
+export function pruneMembers(members: Members, now: number, selfId: string): void {
+  for (const [nodeId, member] of Object.entries(members)) {
+    if (nodeId !== selfId && now - member.seenAt > MEMBER_TTL_MS) delete members[nodeId];
+  }
+}
+
+/** Horloge hybride : jamais en arrière, toujours au-delà de ce qui a été vu. */
+export class HybridClock {
+  private last = 0;
+  constructor(private readonly wall: () => number = Date.now) {}
+  observe(t: number): void {
+    if (t > this.last) this.last = t;
+  }
+  tick(): number {
+    this.last = Math.max(this.wall(), this.last + 1);
+    return this.last;
+  }
+  now(): number {
+    return this.wall();
+  }
+}

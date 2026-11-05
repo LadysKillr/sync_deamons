@@ -1,0 +1,8 @@
+{
+  "id": "sync",
+  "name": "Sync",
+  "description": "Synchronise plugins, versions, réglages, agents et fichiers entre daemons, chiffré par mot de passe, par groupes.",
+  "requirements": {
+    "paseo": ">=0.15.0"
+  }
+}
