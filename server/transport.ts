@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { networkInterfaces } from "node:os";
 import { z } from "zod";
 import { aad, open, seal, type Envelope, type GroupKeys } from "./crypto";
+import { SHA_PATTERN } from "./blobs";
 import { EntrySchema, MemberSchema, ReportSchema } from "./replica";
 
 /**
@@ -18,6 +19,9 @@ export const MAX_BODY = 192 * 1024 * 1024;
 /** Écart d'horloge toléré entre deux machines pour un message. */
 export const MAX_SKEW_MS = 15 * 60_000;
 export const REQUEST_TIMEOUT_MS = 60_000;
+/** Contenus demandés par requête, et volume rendu par réponse au plus (le reste vient à la requête suivante). */
+export const BLOBS_PER_REQUEST = 500;
+export const BLOBS_BYTES_PER_RESPONSE = 48 * 1024 * 1024;
 
 const IdentitySchema = z.object({
   from: z.string().max(64),
@@ -34,12 +38,16 @@ const IdentitySchema = z.object({
 export const RequestSchema = z.discriminatedUnion("type", [
   IdentitySchema.extend({ type: z.literal("pull"), versions: z.record(z.string(), z.string()) }),
   IdentitySchema.extend({ type: z.literal("push"), entries: z.record(z.string(), EntrySchema) }),
+  /** Demande de contenus de fichiers par empreinte (0.2.0). */
+  IdentitySchema.extend({ type: z.literal("blobs"), want: z.array(z.string().regex(SHA_PATTERN)).max(BLOBS_PER_REQUEST) }),
 ]);
 export type SyncRequest = z.infer<typeof RequestSchema>;
 
 export const ResponseSchema = IdentitySchema.extend({
   entries: z.record(z.string(), EntrySchema),
   versions: z.record(z.string(), z.string()),
+  /** Contenus demandés (base64), pour une requête « blobs ». */
+  blobs: z.record(z.string().regex(SHA_PATTERN), z.string()).optional(),
 });
 export type SyncResponse = z.infer<typeof ResponseSchema>;
 

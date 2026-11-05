@@ -1,11 +1,13 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SCOPE, KEY_PREFIX, keyInScope, type GroupScope } from "../shared/model";
 import type { ApplyOutcome, Change, Collector } from "../server/collectors";
 import { aad, deriveMasterKey, groupKeys, open, seal, type GroupKeys } from "../server/crypto";
-import { Engine } from "../server/engine";
+import { Engine, type EngineDeps } from "../server/engine";
+import { BlobStore } from "../server/blobs";
+import { FilesCollector } from "../server/collectors";
 import { SELF_UPDATE_DELAY_MS, SelfCollector } from "../server/self-update";
 import { HybridClock, concurrent, mergeEntries, type Entries, type Json } from "../server/replica";
 import { Store, newGroupState } from "../server/store";
@@ -18,8 +20,10 @@ class MemoryCollector implements Collector {
   failNext = new Set<string>();
   unsure = new Set<string>();
   temporary = new Set<string>();
-  owns(): boolean {
-    return true;
+  /** Clés gérées par un vrai collecteur placé à côté : pas par celui-ci. */
+  others: Collector[] = [];
+  owns(key: string): boolean {
+    return !this.others.some((collector) => collector.owns(key));
   }
   uncertain(key: string): boolean {
     return this.unsure.has(key);
@@ -28,7 +32,7 @@ class MemoryCollector implements Collector {
     return this.temporary.has(key);
   }
   async snapshot(scope: GroupScope): Promise<Map<string, Json>> {
-    return new Map([...this.state].filter(([key]) => keyInScope(scope, key)));
+    return new Map([...this.state].filter(([key]) => keyInScope(scope, key) && this.owns(key)));
   }
   async apply(changes: Change[]): Promise<ApplyOutcome[]> {
     return changes.map(({ key, value }) => {
@@ -49,10 +53,11 @@ interface Node {
   url: string;
 }
 
-function makeNode(name: string, network: Map<string, Node>, extra: Collector[] = []): Node {
+function makeNode(name: string, network: Map<string, Node>, extra: Collector[] = [], deps: Partial<EngineDeps> = {}): Node {
   const store = new Store(mkdtempSync(path.join(tmpdir(), `psync-${name}-`)));
   store.data.node.label = name;
   const memory = new MemoryCollector();
+  memory.others = extra;
   const url = `http://${name}.test:6780`;
   // L'envoi passe vraiment par le chiffrement, comme sur le réseau.
   const send = async (target: string, keys: GroupKeys, request: SyncRequest): Promise<SyncResponse> => {
@@ -67,7 +72,7 @@ function makeNode(name: string, network: Map<string, Node>, extra: Collector[] =
     const sealed = seal(peerKeys, response, aad("res", peerKeys.groupId, envelope.n));
     return ResponseSchema.parse(open(keys, sealed, aad("res", keys.groupId, envelope.n)));
   };
-  const engine = new Engine({ store, collectors: [...extra, memory], send, selfUrl: () => url, log: () => undefined, clock: new HybridClock(() => wall) });
+  const engine = new Engine({ ...deps, store, collectors: [...extra, memory], send, selfUrl: () => url, log: () => undefined, clock: new HybridClock(() => wall) });
   const node = { engine, memory, url };
   network.set(url, node);
   return node;
@@ -467,7 +472,9 @@ describe("mise à jour de Sync lui-même", () => {
       paseoHome: "/nulle-part",
       dataDir: mkdtempSync(path.join(tmpdir(), "psync-self-")),
       log: () => undefined,
-      version,
+      get version() {
+        return installed.version;
+      },
       launch: (args) => launched.push(args),
     });
     return { collector, installed, launched };
@@ -494,6 +501,7 @@ describe("mise à jour de Sync lui-même", () => {
 
       // B redémarre dans la nouvelle version : plus rien à faire, rien d'autre de lancé.
       selfB.installed.revision = "rev-a";
+      selfB.installed.version = "0.2.1";
       await rounds([b, a], id, 3);
       vi.advanceTimersByTime(SELF_UPDATE_DELAY_MS);
       expect(selfB.launched).toHaveLength(1);
@@ -511,6 +519,37 @@ describe("mise à jour de Sync lui-même", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("contenus de fichiers", () => {
+  it("transfère les fichiers par empreinte, sans les mettre dans state.json", async () => {
+    const network = new Map<string, Node>();
+    const homeA = mkdtempSync(path.join(tmpdir(), "psync-blob-home-a-"));
+    const homeB = mkdtempSync(path.join(tmpdir(), "psync-blob-home-b-"));
+    const blobsA = new BlobStore(mkdtempSync(path.join(tmpdir(), "psync-blobs-a-")));
+    const blobsB = new BlobStore(mkdtempSync(path.join(tmpdir(), "psync-blobs-b-")));
+    const filesA = new FilesCollector(() => undefined, homeA, blobsA);
+    const filesB = new FilesCollector(() => undefined, homeB, blobsB);
+    const a = makeNode("a", network, [filesA], { blobs: blobsA, blobsInUse: () => filesA.referencedBlobs() });
+    const b = makeNode("b", network, [filesB], { blobs: blobsB, blobsInUse: () => filesB.referencedBlobs() });
+    mkdirSync(path.join(homeA, ".claude/skills/review"), { recursive: true });
+    const big = "x".repeat(300_000);
+    writeFileSync(path.join(homeA, ".claude/skills/review/SKILL.md"), big);
+
+    const id = await addGroup(a, [], { create: true });
+    a.engine.setScope(a.engine.store.group(id)!, { ...DEFAULT_SCOPE, files: { enabled: true, sets: [{ id: "skills", path: "~/.claude/skills" }] } });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 3);
+
+    expect(readFileSync(path.join(homeB, ".claude/skills/review/SKILL.md"), "utf8")).toBe(big);
+    expect(readFileSync(b.engine.store.file, "utf8")).not.toContain("xxxxxxxxxx");
+    expect(b.engine.view(b.engine.store.group(id)!).problems).toEqual([]);
+
+    // Modifié sur B : repart vers A.
+    writeFileSync(path.join(homeB, ".claude/skills/review/SKILL.md"), "court");
+    await rounds([b, a], id, 2);
+    expect(readFileSync(path.join(homeA, ".claude/skills/review/SKILL.md"), "utf8")).toBe("court");
   });
 });
 

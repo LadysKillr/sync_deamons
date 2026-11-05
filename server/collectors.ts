@@ -4,6 +4,7 @@ import path from "node:path";
 import { KEY_PREFIX, SELF_PLUGIN_ID, isForbiddenConfigPath, pluginInScope, type GroupScope } from "../shared/model";
 import type { LocalPlugin } from "../shared/rpc";
 import { runJson, type PaseoCli } from "./cli";
+import type { BlobStore } from "./blobs";
 import type { Json } from "./replica";
 
 /**
@@ -412,7 +413,8 @@ export const TEMPORARY_NAME = /(\.tmp$|\.sync-|~$|\.swp$)/;
 /** Le fichier a disparu entre la liste du dossier et sa lecture (temporaire renommé, suppression) : on passe. */
 const vanished = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 
-export type FileValue = { b64: string; mode: number };
+/** Valeur d'un fichier : référence au contenu rangé par empreinte (0.2.0), ou contenu inline (avant). */
+export type FileValue = { sha: string; size: number; mode: number } | { b64: string; mode: number };
 
 export function expandHome(input: string, home = homedir()): string {
   if (input === "~") return home;
@@ -430,10 +432,20 @@ export class FilesCollector implements Collector {
   readonly name = "files";
   /** Ensembles connus au dernier instantané, pour retrouver la racine d'une clé à l'application. */
   private sets = new Map<string, string>();
+  /** Empreinte déjà calculée d'un fichier inchangé (même taille, même date) : il n'est pas relu. */
+  private statCache = new Map<string, { size: number; mtimeMs: number; sha: string }>();
+
   constructor(
     private readonly log: (line: string) => void,
     private readonly home = homedir(),
+    /** Sans magasin de contenus, les fichiers voyagent inline (format d'avant 0.2.0). */
+    private readonly blobs?: BlobStore,
   ) {}
+
+  /** Contenus référencés par le dernier instantané (à garder au nettoyage du magasin). */
+  referencedBlobs(): Set<string> {
+    return new Set([...this.statCache.values()].map((entry) => entry.sha));
+  }
 
   /** Clés (ou préfixes de dossier) incertaines au dernier instantané. */
   private unsure: string[] = [];
@@ -454,6 +466,7 @@ export class FilesCollector implements Collector {
     const out = new Map<string, Json>();
     const unsure: string[] = [];
     this.unsure = unsure;
+    const seen = new Set<string>();
     this.sets = new Map(scope.files.sets.map((set) => [set.id, expandHome(set.path, this.home)]));
     if (!scope.files.enabled) return out;
     for (const set of scope.files.sets) {
@@ -496,21 +509,37 @@ export class FilesCollector implements Collector {
           unsureOf(relative);
           return this.log(`fichiers ${set.id} : limite atteinte, ${relative} ignoré`);
         }
-        let content: Buffer;
-        try {
-          content = readFileSync(absolute);
-        } catch (error) {
-          if (vanished(error)) return void unsureOf(relative);
-          throw error;
+        const cached = this.statCache.get(absolute);
+        let value: FileValue;
+        if (this.blobs && cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs && this.blobs.has(cached.sha)) {
+          value = { sha: cached.sha, size: info.size, mode: info.mode & 0o777 };
+          seen.add(absolute);
+        } else {
+          let content: Buffer;
+          try {
+            content = readFileSync(absolute);
+          } catch (error) {
+            if (vanished(error)) return void unsureOf(relative);
+            throw error;
+          }
+          if (this.blobs) {
+            const sha = this.blobs.put(content);
+            this.statCache.set(absolute, { size: info.size, mtimeMs: info.mtimeMs, sha });
+            seen.add(absolute);
+            value = { sha, size: content.length, mode: info.mode & 0o777 };
+          } else {
+            value = { b64: content.toString("base64"), mode: info.mode & 0o777 };
+          }
         }
         total += info.size;
         count += 1;
-        const value: FileValue = { b64: content.toString("base64"), mode: info.mode & 0o777 };
         // Un fichier seul (pas un dossier) a pour chemin relatif son propre nom.
         out.set(keyOf(relative), value);
       };
       visit(root, "");
     }
+    // Le cache ne garde que les fichiers encore présents.
+    for (const absolute of this.statCache.keys()) if (!seen.has(absolute)) this.statCache.delete(absolute);
     return out;
   }
 
@@ -533,11 +562,19 @@ export class FilesCollector implements Collector {
           rmSync(target, { force: true });
         } else {
           const value = change.value as unknown as FileValue;
+          let content: Buffer;
+          if ("sha" in value) {
+            const blob = this.blobs?.get(value.sha) ?? null;
+            if (!blob) throw new Error("contenu pas encore reçu des autres machines");
+            content = blob;
+          } else {
+            content = Buffer.from(value.b64, "base64");
+          }
           // Un fichier privé (aucun droit pour le groupe ni les autres, ex. 0600) arrive dans des dossiers privés (0700).
           const privateFile = (value.mode & 0o077) === 0;
           mkdirSync(path.dirname(target), privateFile ? { recursive: true, mode: 0o700 } : { recursive: true });
           const temporary = `${target}.sync-${process.pid}.tmp`;
-          writeFileSync(temporary, Buffer.from(value.b64, "base64"), { mode: value.mode & 0o777 });
+          writeFileSync(temporary, content, { mode: value.mode & 0o777 });
           chmodSync(temporary, value.mode & 0o777);
           renameSync(temporary, target);
         }

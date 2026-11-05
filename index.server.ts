@@ -24,6 +24,7 @@ import {
 import { createPaseoCli } from "./server/cli";
 import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollector } from "./server/collectors";
 import { JsonKeysCollector, SchedulesCollector } from "./server/collectors-extra";
+import { BlobStore } from "./server/blobs";
 import { deriveMasterKey, groupKeys, normalizeGroupName } from "./server/crypto";
 import { Engine } from "./server/engine";
 import { SelfCollector } from "./server/self-update";
@@ -47,6 +48,8 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   const store = new Store(options.dataDir);
   const cli = createPaseoCli({ home: options.paseoHome, bin: options.cliBin });
   const plugins = new PluginsCollector(cli, options.paseoHome, log);
+  const blobs = new BlobStore(path.join(options.dataDir, "blobs"));
+  const files = new FilesCollector(log, options.home ?? homedir(), blobs);
   const jsonKeys = new JsonKeysCollector(options.home ?? homedir());
   const schedules = new SchedulesCollector(cli, options.paseoHome);
   const runningPlugins = async () => new Set((await plugins.list()).filter((plugin) => plugin.status === "running").map((plugin) => plugin.id));
@@ -54,7 +57,7 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     plugins,
     new PluginSettingsCollector(cli, options.paseoHome, runningPlugins),
     new ConfigCollector(cli, options.paseoHome),
-    new FilesCollector(log, options.home ?? homedir()),
+    files,
     jsonKeys,
     schedules,
     // En dernier : la mise à jour de Sync l'arrête, le reste doit être appliqué avant.
@@ -65,7 +68,16 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   let listenError: string | null = null;
   const selfUrl = () => store.data.node.advertiseUrl ?? `http://${guessAddress()}:${store.data.node.port}`;
 
-  const engine = new Engine({ store, collectors, send: sendRequest, selfUrl, log, afterPass: () => rewatch() });
+  const engine = new Engine({
+    store,
+    collectors,
+    send: sendRequest,
+    selfUrl,
+    log,
+    afterPass: () => rewatch(),
+    blobs,
+    blobsInUse: () => files.referencedBlobs(),
+  });
 
   const handler = {
     keysFor(groupId: string) {

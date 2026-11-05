@@ -37,10 +37,12 @@ export interface SelfUpdateDeps {
 
 export class SelfCollector implements Collector {
   readonly name = "self";
-  private readonly version: string;
 
-  constructor(private readonly deps: SelfUpdateDeps) {
-    this.version = deps.version ?? SYNC_VERSION;
+  constructor(private readonly deps: SelfUpdateDeps) {}
+
+  /** Version du code qui tourne : lue à chaque fois (les tests simulent un redémarrage dans une autre version). */
+  private get version(): string {
+    return this.deps.version ?? SYNC_VERSION;
   }
 
   private get logFile(): string {

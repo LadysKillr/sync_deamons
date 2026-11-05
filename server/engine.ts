@@ -25,7 +25,8 @@ import {
 import { SYNC_VERSION } from "../shared/version";
 import { updateLeader } from "./plugin-updates";
 import type { GroupState, Store } from "./store";
-import type { SyncRequest, SyncResponse } from "./transport";
+import { BLOBS_BYTES_PER_RESPONSE, BLOBS_PER_REQUEST, type SyncRequest, type SyncResponse } from "./transport";
+import { blobRef, type BlobStore } from "./blobs";
 
 /**
  * Le moteur : pour chaque groupe, à chaque passage
@@ -51,6 +52,10 @@ export interface EngineDeps {
   clock?: HybridClock;
   /** Appelé après chaque passage (par exemple pour reposer les surveillances si la portée a changé). */
   afterPass?: () => void;
+  /** Magasin des contenus de fichiers ; sans lui, les fichiers voyagent inline. */
+  blobs?: BlobStore;
+  /** Contenus encore utilisés hors de la réplique (fichiers locaux suivis), à garder au nettoyage. */
+  blobsInUse?: () => Set<string>;
 }
 
 const RECENT_MAX = 40;
@@ -584,18 +589,89 @@ export class Engine {
     let changed: string[] = [];
     if (request.type === "push") {
       changed = this.absorb(group, request, request.entries);
-    } else {
+    } else if (request.type === "pull") {
       this.absorb(group, request, {});
       this.forgetWhatTheyForgot(group, request.versions, request.forgottenBefore);
+    } else {
+      this.absorb(group, request, {});
     }
     const response: SyncResponse = {
       ...this.identity(group),
       entries: request.type === "pull" ? this.newerThan(group.entries, request.versions) : {},
       versions: this.versions(group),
+      ...(request.type === "blobs" ? { blobs: this.readBlobs(request.want) } : {}),
     };
     this.store.save();
     if (changed.length > 0) this.trigger(group.id);
     return response;
+  }
+
+  /** Contenus demandés, jusqu'au plafond d'une réponse. */
+  private readBlobs(want: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    let bytes = 0;
+    for (const sha of want) {
+      const content = this.deps.blobs?.get(sha);
+      if (!content) continue;
+      if (bytes > 0 && bytes + content.length > BLOBS_BYTES_PER_RESPONSE) break;
+      bytes += content.length;
+      out[sha] = content.toString("base64");
+    }
+    return out;
+  }
+
+  /** Empreintes des contenus nécessaires ici (fichiers à appliquer) et absents du magasin. */
+  private missingBlobs(group: GroupState): string[] {
+    const blobs = this.deps.blobs;
+    if (!blobs) return [];
+    const missing = new Set<string>();
+    for (const key of this.pendingKeys(group)) {
+      const sha = blobRef(group.entries[key]?.v);
+      if (sha && !blobs.has(sha)) missing.add(sha);
+    }
+    return [...missing];
+  }
+
+  private async fetchBlobs(group: GroupState, url: string, keys: GroupKeys): Promise<void> {
+    const blobs = this.deps.blobs;
+    if (!blobs) return;
+    let missing = this.missingBlobs(group);
+    while (missing.length > 0) {
+      const want = missing.slice(0, BLOBS_PER_REQUEST);
+      const response = await this.deps.send(url, keys, { type: "blobs", ...this.identity(group), want });
+      let received = 0;
+      for (const [sha, b64] of Object.entries(response.blobs ?? {})) {
+        if (!want.includes(sha)) continue;
+        blobs.put(Buffer.from(b64, "base64"), sha);
+        received += 1;
+      }
+      if (received === 0) return;
+      missing = this.missingBlobs(group);
+    }
+  }
+
+  private lastBlobGc = 0;
+  /** Nettoyage du magasin (au plus toutes les 10 min) : on garde ce que référencent les répliques et leurs historiques. */
+  private collectBlobs(): void {
+    const blobs = this.deps.blobs;
+    const now = this.clock.now();
+    if (!blobs || now - this.lastBlobGc < 10 * 60_000) return;
+    this.lastBlobGc = now;
+    const keep = new Set(this.deps.blobsInUse?.() ?? []);
+    for (const group of this.store.data.groups) {
+      for (const entry of Object.values(group.entries)) {
+        const sha = blobRef(entry.v);
+        if (sha) keep.add(sha);
+      }
+      for (const list of Object.values(group.history)) {
+        for (const entry of list) {
+          const sha = blobRef(entry.v);
+          if (sha) keep.add(sha);
+        }
+      }
+    }
+    const removed = blobs.gc(keep);
+    if (removed > 0) this.deps.log(`magasin de contenus : ${removed} contenus inutilisés supprimés`);
   }
 
   private targets(group: GroupState): string[] {
@@ -622,6 +698,9 @@ export class Engine {
           this.forgetWhatTheyForgot(group, pulled.versions, pulled.forgottenBefore);
           const toPush = this.newerThan(group.entries, pulled.versions);
           if (Object.keys(toPush).length > 0) await this.deps.send(url, keys, { type: "push", ...this.identity(group), entries: toPush });
+          // Contenus de fichiers qui manquent ici pour appliquer : demandés à cette machine (une machine plus
+          // ancienne ne sait pas répondre, ce n'est pas un échec de l'échange).
+          await this.fetchBlobs(group, url, keys).catch((error) => this.deps.log(`contenus depuis ${url} : ${describe(error)}`));
           status.lastOkAt = this.clock.now();
           status.lastError = null;
           reached += 1;
@@ -694,6 +773,7 @@ export class Engine {
       for (const key of Object.keys(group.history)) if (!group.entries[key]) delete group.history[key];
       group.conflicts = group.conflicts.filter((conflict) => now - conflict.at < 7 * 24 * 3600 * 1000 && group.entries[conflict.key]);
       this.refreshReport(group);
+      this.collectBlobs();
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
     } catch (error) {
