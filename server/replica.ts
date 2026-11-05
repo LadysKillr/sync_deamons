@@ -49,8 +49,14 @@ export function mergeEntries(local: Entries, remote: Entries): string[] {
   return changed;
 }
 
+/** Un membre sans adresse http(s) joignable n'est pas une machine du groupe (ex. un client de diagnostic). */
+export function validMemberUrl(url: string): boolean {
+  return /^https?:\/\/[^\s/]+/.test(url);
+}
+
 export function mergeMembers(local: Members, remote: Members): void {
   for (const [nodeId, incoming] of Object.entries(remote)) {
+    if (!validMemberUrl(incoming.url)) continue;
     const current = local[nodeId];
     if (current === undefined || incoming.seenAt > current.seenAt) local[nodeId] = { ...incoming };
   }
@@ -70,7 +76,7 @@ export function pruneTombstones(entries: Entries, now: number): void {
 
 export function pruneMembers(members: Members, now: number, selfId: string): void {
   for (const [nodeId, member] of Object.entries(members)) {
-    if (nodeId !== selfId && now - member.seenAt > MEMBER_TTL_MS) delete members[nodeId];
+    if (nodeId !== selfId && (now - member.seenAt > MEMBER_TTL_MS || !validMemberUrl(member.url))) delete members[nodeId];
   }
 }
 

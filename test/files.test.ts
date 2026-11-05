@@ -53,3 +53,15 @@ describe("fichiers", () => {
     expect(safeRelative("a/b.md")).toBe(true);
   });
 });
+
+import { mergeMembers, pruneMembers } from "../server/replica";
+
+describe("membres", () => {
+  it("ignore et nettoie les membres sans adresse", () => {
+    const members = { n1: { label: "a", url: "http://100.64.0.1:6780", seenAt: 1 }, ghost: { label: "check", url: "", seenAt: 2 } };
+    pruneMembers(members, 3, "n1");
+    expect(Object.keys(members)).toEqual(["n1"]);
+    mergeMembers(members, { ghost2: { label: "check", url: "", seenAt: 5 } });
+    expect(Object.keys(members)).toEqual(["n1"]);
+  });
+});

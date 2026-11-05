@@ -2,7 +2,7 @@ import { DEFAULT_SCOPE, GroupScopeSchema, SCOPE_KEY, keyInScope, type GroupScope
 import type { GroupView, StatusView } from "../shared/rpc";
 import type { Collector } from "./collectors";
 import { groupKeys, hashValue, type GroupKeys } from "./crypto";
-import { HybridClock, maxTime, mergeEntries, mergeMembers, newer, pruneMembers, pruneTombstones, type Entries, type Entry, type Json } from "./replica";
+import { HybridClock, maxTime, mergeEntries, mergeMembers, newer, pruneMembers, validMemberUrl, pruneTombstones, type Entries, type Entry, type Json } from "./replica";
 import type { GroupState, Store } from "./store";
 import type { SyncRequest, SyncResponse } from "./transport";
 
@@ -235,7 +235,7 @@ export class Engine {
     this.clock.observe(maxTime(entries));
     const changed = mergeEntries(group.entries, entries);
     mergeMembers(group.members, from.members);
-    if (from.from !== this.nodeId) group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now() };
+    if (from.from !== this.nodeId && validMemberUrl(from.url)) group.members[from.from] = { label: from.label, url: from.url, seenAt: this.clock.now() };
     return changed;
   }
 
