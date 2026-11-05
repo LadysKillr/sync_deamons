@@ -10,10 +10,12 @@ import {
   groupCreateRpc,
   groupRemoveRpc,
   groupUpdateRpc,
+  historyRpc,
   inviteDecodeRpc,
   inviteRpc,
   nodeUpdateRpc,
   pluginsListRpc,
+  restoreRpc,
   statusRpc,
   syncNowRpc,
   type NodeView,
@@ -177,6 +179,16 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     store.save();
     void engine.run(id);
     return { count };
+  });
+
+  handle(historyRpc, async ({ id, key }) => ({ versions: engine.historyOf(requireGroup(id), key) }));
+
+  handle(restoreRpc, async ({ id, key, hash }) => {
+    const group = requireGroup(id);
+    engine.restore(group, key, hash);
+    store.save();
+    void engine.run(id);
+    return { ok: true as const };
   });
 
   handle(groupRemoveRpc, async ({ id }) => {

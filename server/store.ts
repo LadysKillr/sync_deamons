@@ -52,6 +52,19 @@ export const GroupStateSchema = z.object({
   /** Versions (empreintes) approuvées ou refusées, par clé. */
   approved: z.record(z.string(), z.string()).default({}),
   rejected: z.record(z.string(), z.string()).default({}),
+  /** Versions précédentes de chaque élément, la plus récente d'abord (HISTORY_DEPTH au plus). */
+  history: z.record(z.string(), z.array(EntrySchema)).default({}),
+  /** Conflits récents : deux machines ont modifié le même élément presque en même temps. */
+  conflicts: z
+    .array(
+      z.object({
+        key: z.string(),
+        at: z.number(),
+        winner: z.object({ o: z.string(), h: z.string(), t: z.number() }),
+        loser: z.object({ o: z.string(), h: z.string(), t: z.number() }),
+      }),
+    )
+    .default([]),
   /** Heure de la plus récente trace de suppression oubliée ici : horizon d'oubli (voir Engine.admissible). */
   forgottenBefore: z.number().default(0),
   entries: z.record(z.string(), EntrySchema),
@@ -152,6 +165,8 @@ export function newGroupState(input: {
     createdAt: input.now,
     joining: input.peers.length > 0,
     forgottenBefore: 0,
+    history: {},
+    conflicts: [],
     exclude: [],
     approval: false,
     approved: {},

@@ -19,8 +19,22 @@ export const EntrySchema = z.object({
   h: z.string().max(64),
   t: z.number().int().nonnegative(),
   o: z.string().max(64),
+  /** Empreinte de la version que celle-ci a remplacée chez son auteur (absente avant 0.2.0). */
+  p: z.string().max(64).optional(),
 });
-export type Entry = { v: Json; h: string; t: number; o: string };
+export type Entry = { v: Json; h: string; t: number; o: string; p?: string };
+
+/**
+ * Deux versions sont concurrentes si aucune n'a été écrite en connaissant l'autre. Sans parent connu (version relayée
+ * par une machine plus ancienne), on se rabat sur la proximité dans le temps.
+ */
+export function concurrent(a: Entry, b: Entry): boolean {
+  if (a.o === b.o || a.h === b.h) return false;
+  // L'une a été écrite par-dessus l'autre : changements successifs.
+  if (a.p === b.h || b.p === a.h) return false;
+  if (a.p !== undefined && b.p !== undefined) return true;
+  return Math.abs(a.t - b.t) <= CONFLICT_WINDOW_MS;
+}
 export type Entries = Record<string, Entry>;
 
 export const MemberSchema = z.object({ label: z.string().max(120), url: z.string().max(500), seenAt: z.number().int().nonnegative() });
@@ -47,6 +61,11 @@ export const ReportSchema = z.object({
   /** Exclusions de la machine et changements en attente de son accord (absents avant 0.2.0). */
   excluded: z.array(z.string().max(500)).max(REPORT_LIMIT).default([]),
   awaiting: z.array(z.string().max(500)).max(REPORT_LIMIT).default([]),
+  /** Conflits vus par cette machine (absents avant 0.2.0). */
+  conflicts: z
+    .array(z.object({ key: z.string().max(500), at: z.number(), winner: z.string().max(64), loser: z.string().max(64), winnerHash: z.string().max(64), loserHash: z.string().max(64) }))
+    .max(20)
+    .default([]),
 });
 export type Report = z.infer<typeof ReportSchema>;
 export type Reports = Record<string, Report>;
@@ -78,18 +97,33 @@ export function newer(a: Entry, b: Entry): boolean {
   return a.h > b.h;
 }
 
-/** Fusionne `remote` dans `local` (modifié en place) ; renvoie les clés qui ont changé. */
-export function mergeEntries(local: Entries, remote: Entries): string[] {
+/**
+ * Fusionne `remote` dans `local` (modifié en place) ; renvoie les clés qui ont changé. `onCompare` voit chaque
+ * élément reçu qui diffère de la version locale, qu'il la remplace ou non (historique, conflits).
+ */
+export function mergeEntries(
+  local: Entries,
+  remote: Entries,
+  onCompare?: (key: string, current: Entry, incoming: Entry, replaced: boolean) => void,
+): string[] {
   const changed: string[] = [];
   for (const [key, incoming] of Object.entries(remote)) {
     const current = local[key];
-    if (current === undefined || newer(incoming, current)) {
-      local[key] = { v: incoming.v, h: incoming.h, t: incoming.t, o: incoming.o };
+    const replace = current === undefined || newer(incoming, current);
+    if (current !== undefined && current.h !== incoming.h) onCompare?.(key, current, incoming, replace);
+    if (replace) {
+      local[key] = { v: incoming.v, h: incoming.h, t: incoming.t, o: incoming.o, ...(incoming.p !== undefined ? { p: incoming.p } : {}) };
       changed.push(key);
     }
   }
   return changed;
 }
+
+/** Repli sans parent connu : deux écritures à moins de ce délai sont tenues pour concurrentes. */
+export const CONFLICT_WINDOW_MS = 2 * 60_000;
+export const HISTORY_DEPTH = 5;
+/** Une valeur plus grosse n'est pas gardée dans l'historique (les fichiers n'y laissent que leur référence). */
+export const HISTORY_MAX_VALUE = 256 * 1024;
 
 /** Un membre sans adresse http(s) joignable n'est pas une machine du groupe (ex. un client de diagnostic). */
 export function validMemberUrl(url: string): boolean {

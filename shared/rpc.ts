@@ -99,6 +99,20 @@ export const GroupViewSchema = z.object({
   ),
   /** Clés dont la version actuelle a été refusée ici. */
   rejected: z.array(z.string()),
+  /** Conflits récents (7 jours). */
+  conflicts: z.array(
+    z.object({
+      key: z.string(),
+      at: z.number(),
+      winner: z.string(),
+      loser: z.string(),
+      loserHash: z.string(),
+      /** La version perdante est dans l'historique de cette machine : elle peut être rétablie d'ici. */
+      canRestore: z.boolean(),
+      /** Machines qui ont vu le conflit (celle qui a perdu peut le rétablir). */
+      seenBy: z.array(z.string()),
+    }),
+  ),
 });
 export type GroupView = z.infer<typeof GroupViewSchema>;
 
@@ -199,4 +213,27 @@ export const decideRpc = defineRpc({
     decision: z.enum(["approve", "reject"]),
   }),
   output: z.object({ count: z.number() }),
+});
+
+export const HistoryEntrySchema = z.object({
+  h: z.string(),
+  t: z.number(),
+  origin: z.string(),
+  deletion: z.boolean(),
+  revision: z.string().nullable(),
+  current: z.boolean(),
+});
+export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
+
+export const historyRpc = defineRpc({
+  name: "sync.item.history",
+  input: z.object({ id: z.string(), key: z.string() }),
+  output: z.object({ versions: z.array(HistoryEntrySchema) }),
+});
+
+/** Republie une ancienne version pour tout le groupe. */
+export const restoreRpc = defineRpc({
+  name: "sync.item.restore",
+  input: z.object({ id: z.string(), key: z.string(), hash: z.string() }),
+  output: z.object({ ok: z.literal(true) }),
 });

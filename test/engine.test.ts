@@ -6,7 +6,7 @@ import { DEFAULT_SCOPE, KEY_PREFIX, keyInScope, type GroupScope } from "../share
 import type { ApplyOutcome, Change, Collector } from "../server/collectors";
 import { aad, deriveMasterKey, groupKeys, open, seal, type GroupKeys } from "../server/crypto";
 import { Engine } from "../server/engine";
-import { HybridClock, mergeEntries, type Entries, type Json } from "../server/replica";
+import { HybridClock, concurrent, mergeEntries, type Entries, type Json } from "../server/replica";
 import { Store, newGroupState } from "../server/store";
 import { RequestSchema, ResponseSchema, sendRequest, startServer, type SyncRequest, type SyncResponse } from "../server/transport";
 
@@ -121,6 +121,20 @@ describe("fusion", () => {
     expect(mergeEntries(left, y)).toEqual([]);
     expect(left.k!.v).toBe(3);
     expect(left.j!.v).toBeNull();
+  });
+});
+
+describe("concurrence", () => {
+  it("distingue des changements successifs de changements concurrents", () => {
+    const v0 = { v: 0, h: "h0", t: 1, o: "a" };
+    const va = { v: 1, h: "ha", t: 10, o: "a", p: "h0" };
+    const vb = { v: 2, h: "hb", t: 11, o: "b", p: "h0" };
+    const vbAfterA = { v: 2, h: "hb2", t: 11, o: "b", p: "ha" };
+    expect(concurrent(va, vb)).toBe(true);
+    expect(concurrent(va, vbAfterA)).toBe(false);
+    // Sans parent (versions relayées par une machine plus ancienne) : proximité dans le temps.
+    expect(concurrent({ ...v0, o: "a", h: "x" }, { ...v0, o: "b", h: "y", t: 60_000 })).toBe(true);
+    expect(concurrent({ ...v0, o: "a", h: "x" }, { ...v0, o: "b", h: "y", t: 10 * 60_000 })).toBe(false);
   });
 });
 
@@ -375,6 +389,63 @@ describe("exclusions et approbation", () => {
     a.memory.state.set(key, plugin("3"));
     await rounds([a, b], id, 2);
     expect(b.engine.view(gb).awaiting.map((change) => change.revision)).toEqual(["3"]);
+  });
+});
+
+describe("historique et conflits", () => {
+  it("garde les versions précédentes et permet de revenir à l'une d'elles partout", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    for (const revision of ["1", "2", "3"]) {
+      a.memory.state.set(key, plugin(revision));
+      await rounds([a, b], id, 2);
+    }
+    const gb = b.engine.store.group(id)!;
+    const versions = b.engine.historyOf(gb, key);
+    expect(versions.map((version) => version.revision)).toEqual(["3", "2", "1"]);
+    expect(versions[0]!.current).toBe(true);
+
+    // Depuis B, retour à la 1 : A suit.
+    b.engine.restore(gb, key, versions[2]!.h);
+    await rounds([b, a], id, 2);
+    expect(a.memory.state.get(key)).toEqual(plugin("1"));
+    expect(b.memory.state.get(key)).toEqual(plugin("1"));
+  });
+
+  it("signale deux changements presque simultanés et garde la version perdante", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.config}agents`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+
+    // Chacun modifie de son côté, avant tout échange.
+    a.memory.state.set(key, { from: "a" });
+    b.memory.state.set(key, { from: "b" });
+    tick();
+    await a.engine.scan(a.engine.store.group(id)!);
+    tick();
+    await b.engine.scan(b.engine.store.group(id)!);
+    await rounds([a, b], id, 2);
+
+    const ga = a.engine.store.group(id)!;
+    const gb = b.engine.store.group(id)!;
+    // B a écrit en dernier : B l'emporte, partout.
+    expect(a.memory.state.get(key)).toEqual({ from: "b" });
+    // Le conflit est visible des deux côtés ; seule A (qui a perdu) a la version perdante sous la main.
+    expect(a.engine.view(ga).conflicts[0]).toMatchObject({ key, winner: "b", loser: "a", canRestore: true });
+    expect(b.engine.view(gb).conflicts[0]).toMatchObject({ key, winner: "b", loser: "a", canRestore: false, seenBy: ["a"] });
+    // La version de A peut être rétablie depuis A.
+    a.engine.restore(ga, key, a.engine.view(ga).conflicts[0]!.loserHash);
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.get(key)).toEqual({ from: "a" });
+    expect(a.engine.view(ga).conflicts).toHaveLength(0);
   });
 });
 

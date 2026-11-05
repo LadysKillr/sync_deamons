@@ -1,8 +1,10 @@
 import { DEFAULT_SCOPE, GroupScopeSchema, KEY_PREFIX, SCOPE_KEY, keyInScope, matchesExclusion, type GroupScope } from "../shared/model";
 import type { GroupView, StatusView } from "../shared/rpc";
 import type { Collector } from "./collectors";
-import { groupKeys, hashValue, type GroupKeys } from "./crypto";
+import { canonical, groupKeys, hashValue, type GroupKeys } from "./crypto";
 import {
+  HISTORY_DEPTH,
+  HISTORY_MAX_VALUE,
   HybridClock,
   REPORT_LIMIT,
   maxTime,
@@ -18,6 +20,7 @@ import {
   type Entry,
   type Json,
   type Report,
+  concurrent,
 } from "./replica";
 import { SYNC_VERSION } from "../shared/version";
 import type { GroupState, Store } from "./store";
@@ -137,11 +140,97 @@ export class Engine {
     if (group.recent.length > RECENT_MAX) group.recent.length = RECENT_MAX;
   }
 
+  /** Garde une version dans l'historique de la clé (sans doublon, sans valeur trop grosse). */
+  private remember(group: GroupState, key: string, entry: Entry): void {
+    const list = (group.history[key] ??= []);
+    if (list.some((old) => old.h === entry.h && old.o === entry.o && old.t === entry.t)) return;
+    if (entry.v !== null && canonical(entry.v).length > HISTORY_MAX_VALUE) return;
+    list.unshift({ ...entry });
+    list.sort((x, y) => y.t - x.t);
+    if (list.length > HISTORY_DEPTH) list.length = HISTORY_DEPTH;
+  }
+
+  /** Remplace la version d'un élément en gardant l'ancienne dans l'historique. */
+  private publish(group: GroupState, key: string, value: Json): Entry {
+    const previous = group.entries[key];
+    if (previous) this.remember(group, key, previous);
+    const entry: Entry = { v: value, h: hashValue(value), t: this.clock.tick(), o: this.nodeId, ...(previous ? { p: previous.h } : {}) };
+    group.entries[key] = entry;
+    return entry;
+  }
+
   /** Nouvelle portée décidée ici : elle part comme un changement local. */
   setScope(group: GroupState, scope: GroupScope): void {
-    const value = scope as unknown as Json;
-    group.entries[SCOPE_KEY] = { v: value, h: hashValue(value), t: this.clock.tick(), o: this.nodeId };
+    this.publish(group, SCOPE_KEY, scope as unknown as Json);
     this.activity(group, SCOPE_KEY, "published", this.nodeId);
+  }
+
+  /** Republie une version de l'historique comme un nouveau changement fait ici : tout le groupe y revient. */
+  restore(group: GroupState, key: string, hash: string): void {
+    const version = (group.history[key] ?? []).find((entry) => entry.h === hash) ?? (group.entries[key]?.h === hash ? group.entries[key] : undefined);
+    if (!version) throw new Error("Cette version n'est plus dans l'historique.");
+    this.publish(group, key, version.v);
+    delete group.attempts[key];
+    delete group.rejected[key];
+    group.conflicts = group.conflicts.filter((conflict) => conflict.key !== key);
+    this.activity(group, key, version.v === null ? "deleted" : "published", this.nodeId);
+  }
+
+  /** Historique d'un élément, version actuelle comprise. */
+  historyOf(group: GroupState, key: string): Array<{ h: string; t: number; origin: string; deletion: boolean; revision: string | null; current: boolean }> {
+    const current = group.entries[key];
+    const list = [...(current ? [current] : []), ...(group.history[key] ?? []).filter((entry) => entry.h !== current?.h || entry.t !== current?.t)];
+    return list.map((entry) => ({
+      h: entry.h,
+      t: entry.t,
+      origin: group.members[entry.o]?.label ?? entry.o,
+      deletion: entry.v === null,
+      revision: revisionOf(entry.v),
+      current: entry === current,
+    }));
+  }
+
+  /** Conflits vus ici et par les autres machines (comptes rendus), sans doublon, encore d'actualité. */
+  private allConflicts(group: GroupState) {
+    const merged = new Map<string, { key: string; at: number; winner: string; loser: string; winnerHash: string; loserHash: string; seenBy: string[] }>();
+    const own = group.conflicts.map((conflict) => ({
+      key: conflict.key,
+      at: conflict.at,
+      winner: conflict.winner.o,
+      loser: conflict.loser.o,
+      winnerHash: conflict.winner.h,
+      loserHash: conflict.loser.h,
+    }));
+    const sources: Array<[string, typeof own]> = [[this.nodeId, own]];
+    for (const [nodeId, report] of Object.entries(group.reports)) if (nodeId !== this.nodeId) sources.push([nodeId, report.conflicts]);
+    for (const [nodeId, list] of sources) {
+      for (const conflict of list) {
+        // Un conflit dont la version gagnante n'est plus l'actuelle a été réglé depuis.
+        if (group.entries[conflict.key]?.h !== conflict.winnerHash) continue;
+        const id = `${conflict.key}|${conflict.winnerHash}|${conflict.loserHash}`;
+        const known = merged.get(id);
+        if (known) known.seenBy.push(nodeId);
+        else merged.set(id, { ...conflict, seenBy: [nodeId] });
+      }
+    }
+    return [...merged.values()].sort((x, y) => y.at - x.at);
+  }
+
+  /** Chaque élément reçu qui diffère de la version locale : historique et détection des conflits. */
+  private compare(group: GroupState, key: string, current: Entry, incoming: Entry, replaced: boolean): void {
+    // La version perdante (l'ancienne si remplacée, la reçue sinon) reste disponible pour une restauration.
+    this.remember(group, key, replaced ? current : incoming);
+    if (!concurrent(current, incoming)) return;
+    const [winner, loser] = replaced ? [incoming, current] : [current, incoming];
+    if (group.conflicts.some((conflict) => conflict.key === key && conflict.loser.h === loser.h && conflict.winner.h === winner.h)) return;
+    group.conflicts.unshift({
+      key,
+      at: this.clock.now(),
+      winner: { o: winner.o, h: winner.h, t: winner.t },
+      loser: { o: loser.o, h: loser.h, t: loser.t },
+    });
+    if (group.conflicts.length > 20) group.conflicts.length = 20;
+    this.deps.log(`${key} : conflit, ${group.members[winner.o]?.label ?? winner.o} l'emporte sur ${group.members[loser.o]?.label ?? loser.o}`);
   }
 
   private collectorFor(key: string): Collector | undefined {
@@ -202,7 +291,7 @@ export class Engine {
         group.baseline[key] = entry?.h ?? hash;
         continue;
       }
-      group.entries[key] = { v: value, h: hash, t: this.clock.tick(), o: this.nodeId };
+      this.publish(group, key, value);
       group.baseline[key] = hash;
       delete group.attempts[key];
       this.activity(group, key, value === null ? "deleted" : "published", this.nodeId);
@@ -360,6 +449,14 @@ export class Engine {
       errors,
       excluded: group.exclude.slice(0, REPORT_LIMIT),
       awaiting: this.awaitingKeys(group).slice(0, REPORT_LIMIT),
+      conflicts: group.conflicts.slice(0, 20).map((conflict) => ({
+        key: conflict.key,
+        at: conflict.at,
+        winner: conflict.winner.o,
+        loser: conflict.loser.o,
+        winnerHash: conflict.winner.h,
+        loserHash: conflict.loser.h,
+      })),
     };
     group.reports[this.nodeId] = report;
     return report;
@@ -428,7 +525,7 @@ export class Engine {
   ): string[] {
     entries = this.admissible(group, entries);
     this.clock.observe(maxTime(entries));
-    const changed = mergeEntries(group.entries, entries);
+    const changed = mergeEntries(group.entries, entries, (key, current, incoming, replaced) => this.compare(group, key, current, incoming, replaced));
     mergeMembers(group.members, from.members);
     // Seule cette machine parle d'elle-même : un compte rendu à son nom venu d'ailleurs est ignoré.
     const { [this.nodeId]: _mine, ...others } = from.reports ?? {};
@@ -551,6 +648,8 @@ export class Engine {
       pruneMembers(group.members, now, this.nodeId);
       for (const nodeId of Object.keys(group.reports)) if (!group.members[nodeId]) delete group.reports[nodeId];
       this.pruneDecisions(group);
+      for (const key of Object.keys(group.history)) if (!group.entries[key]) delete group.history[key];
+      group.conflicts = group.conflicts.filter((conflict) => now - conflict.at < 7 * 24 * 3600 * 1000 && group.entries[conflict.key]);
       this.refreshReport(group);
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
@@ -613,6 +712,15 @@ export class Engine {
       approval: group.approval,
       awaiting,
       rejected: Object.keys(group.rejected),
+      conflicts: this.allConflicts(group).map((conflict) => ({
+        key: conflict.key,
+        at: conflict.at,
+        winner: labelOf(conflict.winner),
+        loser: labelOf(conflict.loser),
+        loserHash: conflict.loserHash,
+        canRestore: (group.history[conflict.key] ?? []).some((entry) => entry.h === conflict.loserHash),
+        seenBy: conflict.seenBy.map(labelOf),
+      })),
       machines,
       itemStatus,
       mode: group.mode,
