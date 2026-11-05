@@ -23,6 +23,7 @@ import {
 } from "./shared/rpc";
 import { createPaseoCli } from "./server/cli";
 import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollector } from "./server/collectors";
+import { JsonKeysCollector, SchedulesCollector } from "./server/collectors-extra";
 import { deriveMasterKey, groupKeys, normalizeGroupName } from "./server/crypto";
 import { Engine } from "./server/engine";
 import { SelfCollector } from "./server/self-update";
@@ -46,12 +47,16 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   const store = new Store(options.dataDir);
   const cli = createPaseoCli({ home: options.paseoHome, bin: options.cliBin });
   const plugins = new PluginsCollector(cli, options.paseoHome, log);
+  const jsonKeys = new JsonKeysCollector(options.home ?? homedir());
+  const schedules = new SchedulesCollector(cli, options.paseoHome);
   const runningPlugins = async () => new Set((await plugins.list()).filter((plugin) => plugin.status === "running").map((plugin) => plugin.id));
   const collectors = [
     plugins,
     new PluginSettingsCollector(cli, options.paseoHome, runningPlugins),
     new ConfigCollector(cli, options.paseoHome),
     new FilesCollector(log, options.home ?? homedir()),
+    jsonKeys,
+    schedules,
     // En dernier : la mise à jour de Sync l'arrête, le reste doit être appliqué avant.
     new SelfCollector({ cli, list: () => plugins.list(), paseoHome: options.paseoHome, dataDir: options.dataDir, log }),
   ];
@@ -97,12 +102,14 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
       watching = 0;
       return;
     }
-    const roots = store.data.groups.flatMap((group) => {
-      const scope = engine.scopeOf(group);
-      return scope.files.enabled ? scope.files.sets.map((set) => expandHome(set.path, options.home ?? homedir())) : [];
-    });
+    const enabled = store.data.groups.filter((group) => group.enabled).map((group) => engine.scopeOf(group));
+    const roots = enabled.flatMap((scope) => [
+      ...(scope.files.enabled ? scope.files.sets.map((set) => expandHome(set.path, options.home ?? homedir())) : []),
+      ...jsonKeys.files(scope),
+    ]);
+    const dirs = enabled.some((scope) => scope.schedules.enabled) ? [schedules.dir] : [];
     try {
-      const targets = watchTargets(options.paseoHome, [...new Set(roots)]);
+      const targets = watchTargets(options.paseoHome, [...new Set(roots)], dirs);
       watcher.update(targets);
       watching = targets.length;
     } catch (error) {

@@ -18,6 +18,8 @@ export const KEY_PREFIX = {
   config: "config/",
   file: "file/",
   self: "self/",
+  json: "json/",
+  schedule: "schedule/",
 } as const;
 
 /** Clé de la version de Sync lui-même (mise à jour automatique). */
@@ -33,6 +35,16 @@ export const FileSetSchema = z.object({
   path: z.string().min(1),
 });
 export type FileSet = z.infer<typeof FileSetSchema>;
+
+/** Une clé d'un fichier JSON (le reste du fichier n'est pas touché), par exemple les serveurs MCP de Claude Code. */
+export const JsonKeySchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/, "identifiant : minuscules, chiffres, - et _"),
+  /** Fichier JSON ; `~` = dossier personnel de la machine. */
+  file: z.string().min(1),
+  /** Chemin de la clé, segments séparés par des points (`mcpServers`, `permissions.allow`). */
+  path: z.string().regex(/^[^.\s][^\s]*$/, "chemin de clé invalide"),
+});
+export type JsonKey = z.infer<typeof JsonKeySchema>;
 
 export const GroupScopeSchema = z.object({
   plugins: z.object({
@@ -53,6 +65,10 @@ export const GroupScopeSchema = z.object({
   selfUpdate: z.boolean().default(false),
   /** Une machine vérifie les nouvelles versions des plugins retenus et les installe ; le groupe suit. */
   autoUpdatePlugins: z.boolean().default(false),
+  /** Clés de fichiers JSON (absent avant 0.2.0). */
+  json: z.object({ enabled: z.boolean(), entries: z.array(JsonKeySchema) }).default({ enabled: false, entries: [] }),
+  /** Planifications Paseo : chaque machine du groupe les exécute (absent avant 0.2.0). */
+  schedules: z.object({ enabled: z.boolean() }).default({ enabled: false }),
 });
 export type GroupScope = z.infer<typeof GroupScopeSchema>;
 
@@ -66,7 +82,24 @@ export const DEFAULT_SCOPE: GroupScope = {
   propagateDeletions: true,
   selfUpdate: false,
   autoUpdatePlugins: false,
+  json: { enabled: false, entries: [] },
+  schedules: { enabled: false },
 };
+
+/** Préréglages proposés dans l'écran : ce qu'on synchronise le plus souvent avec les agents. */
+export const FILE_PRESETS: ReadonlyArray<FileSet & { label: string }> = [
+  { id: "claude-skills", path: "~/.claude/skills", label: "Claude Code : skills" },
+  { id: "claude-agents", path: "~/.claude/agents", label: "Claude Code : sous-agents" },
+  { id: "claude-commands", path: "~/.claude/commands", label: "Claude Code : commandes" },
+  { id: "claude-md", path: "~/.claude/CLAUDE.md", label: "Claude Code : instructions (CLAUDE.md)" },
+  { id: "codex-agents-md", path: "~/.codex/AGENTS.md", label: "Codex : instructions (AGENTS.md)" },
+  { id: "codex-prompts", path: "~/.codex/prompts", label: "Codex : prompts" },
+];
+
+export const JSON_PRESETS: ReadonlyArray<JsonKey & { label: string }> = [
+  { id: "claude-mcp", file: "~/.claude.json", path: "mcpServers", label: "Claude Code : serveurs MCP" },
+  { id: "claude-permissions", file: "~/.claude/settings.json", path: "permissions", label: "Claude Code : permissions" },
+];
 
 /**
  * Chemins de config jamais synchronisés : adresse d'écoute, mot de passe du daemon, relais, identité, et la liste
@@ -94,9 +127,11 @@ export function pluginInScope(scope: GroupScope, pluginId: string): boolean {
   return !ids.includes(pluginId);
 }
 
-export function categoryOfKey(key: string): "plugins" | "pluginSettings" | "config" | "files" | "scope" | "self" | null {
+export function categoryOfKey(key: string): "plugins" | "pluginSettings" | "config" | "files" | "json" | "schedules" | "scope" | "self" | null {
   if (key === SCOPE_KEY) return "scope";
   if (key === SELF_KEY) return "self";
+  if (key.startsWith(KEY_PREFIX.json)) return "json";
+  if (key.startsWith(KEY_PREFIX.schedule)) return "schedules";
   if (key.startsWith(KEY_PREFIX.plugin)) return "plugins";
   if (key.startsWith(KEY_PREFIX.settings)) return "pluginSettings";
   if (key.startsWith(KEY_PREFIX.config)) return "config";
@@ -111,6 +146,10 @@ export function keyInScope(scope: GroupScope, key: string): boolean {
       return true;
     case "self":
       return scope.selfUpdate;
+    case "json":
+      return scope.json.enabled && scope.json.entries.some((entry) => `${KEY_PREFIX.json}${entry.id}` === key);
+    case "schedules":
+      return scope.schedules.enabled;
     case "plugins":
       return scope.plugins.enabled && pluginInScope(scope, key.slice(KEY_PREFIX.plugin.length));
     case "pluginSettings": {

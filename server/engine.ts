@@ -857,7 +857,7 @@ export class Engine {
       return status;
     });
     // Plugins d'abord, puis réglages, config et fichiers ; problèmes en tête de chaque catégorie.
-    const rank = (key: string) => ["plugin/", "settings/", "config/", "file/"].findIndex((prefix) => key.startsWith(prefix));
+    const rank = (key: string) => ["self/", "plugin/", "settings/", "config/", "json/", "schedule/", "file/"].findIndex((prefix) => key.startsWith(prefix));
     itemStatus.sort((a, b) => rank(a.key) - rank(b.key) || b.errors.length - a.errors.length || a.key.localeCompare(b.key));
     return { machines, itemStatus };
   }

@@ -81,7 +81,7 @@ export class ChangeWatcher {
 }
 
 /** Ce qu'il faut surveiller pour un daemon et des ensembles de fichiers donnés. */
-export function watchTargets(paseoHome: string, fileRoots: string[]): WatchTarget[] {
+export function watchTargets(paseoHome: string, fileRoots: string[], extraDirs: string[] = []): WatchTarget[] {
   const settings = path.join(paseoHome, "plugin-settings");
   mkdirSync(settings, { recursive: true });
   const targets: WatchTarget[] = [
@@ -89,6 +89,7 @@ export function watchTargets(paseoHome: string, fileRoots: string[]): WatchTarge
     { dir: path.join(paseoHome, "plugins"), recursive: false, names: ["sources.json"] },
     { dir: settings, recursive: true },
   ];
+  for (const dir of extraDirs) targets.push({ dir, recursive: false });
   for (const root of fileRoots) {
     if (existsSync(root) && statSync(root).isFile()) {
       targets.push({ dir: path.dirname(root), recursive: false, names: [path.basename(root)] });
