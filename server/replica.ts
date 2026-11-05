@@ -107,10 +107,16 @@ export function maxTime(entries: Entries): number {
   return max;
 }
 
-export function pruneTombstones(entries: Entries, now: number): void {
+/** Oublie les vieilles traces de suppression ; renvoie l'heure de la plus récente oubliée (0 si aucune). */
+export function pruneTombstones(entries: Entries, now: number): number {
+  let horizon = 0;
   for (const [key, entry] of Object.entries(entries)) {
-    if (entry.v === null && now - entry.t > TOMBSTONE_TTL_MS) delete entries[key];
+    if (entry.v === null && now - entry.t > TOMBSTONE_TTL_MS) {
+      horizon = Math.max(horizon, entry.t);
+      delete entries[key];
+    }
   }
+  return horizon;
 }
 
 export function pruneMembers(members: Members, now: number, selfId: string): void {

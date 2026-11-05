@@ -27,6 +27,8 @@ const IdentitySchema = z.object({
   members: z.record(z.string(), MemberSchema),
   /** Absent chez les versions 0.1.3 et avant. */
   reports: z.record(z.string(), ReportSchema).optional(),
+  /** Horizon d'oubli de l'expéditeur (absent avant 0.2.0). */
+  forgottenBefore: z.number().optional(),
 });
 
 export const RequestSchema = z.discriminatedUnion("type", [

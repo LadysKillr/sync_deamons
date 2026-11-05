@@ -209,10 +209,10 @@ export class Engine {
     const wanted = new Map<string, Entry>();
     for (const [key, entry] of Object.entries(group.entries)) {
       if (key === SCOPE_KEY || !keyInScope(scope, key) || !this.owned(group, key)) continue;
+      if (this.ignored(key)) continue;
       const base = group.baseline[key];
       if (entry.h === base) continue;
       if (base === undefined && entry.v === null) {
-      if (this.ignored(key)) continue;
         group.baseline[key] = entry.h;
         continue;
       }
@@ -314,7 +314,15 @@ export class Engine {
     const url = this.deps.selfUrl();
     group.members[this.nodeId] = { label: this.store.data.node.label, url, seenAt: this.clock.now() };
     this.refreshReport(group);
-    return { from: this.nodeId, label: this.store.data.node.label, url, ts: this.clock.now(), members: group.members, reports: group.reports };
+    return {
+      from: this.nodeId,
+      label: this.store.data.node.label,
+      url,
+      ts: this.clock.now(),
+      members: group.members,
+      reports: group.reports,
+      forgottenBefore: group.forgottenBefore,
+    };
   }
 
   private versions(group: GroupState): Record<string, string> {
@@ -331,11 +339,39 @@ export class Engine {
     return out;
   }
 
+  /**
+   * Un élément inconnu ici et plus ancien que l'horizon d'oubli est refusé : c'est ce qu'enverrait une machine revenue
+   * après une longue absence avec un élément supprimé depuis, dont la trace de suppression a été oubliée (30 jours).
+   */
+  private admissible(group: GroupState, entries: Entries): Entries {
+    if (group.forgottenBefore === 0) return entries;
+    const out: Entries = {};
+    for (const [key, entry] of Object.entries(entries)) {
+      if (key !== SCOPE_KEY && group.entries[key] === undefined && entry.t <= group.forgottenBefore) continue;
+      out[key] = entry;
+    }
+    return out;
+  }
+
+  /**
+   * L'autre machine n'a pas `clé` et a oublié des suppressions jusqu'à `theirHorizon` : si notre version est plus
+   * ancienne, elle l'a refusée ou oubliée. On l'oublie aussi ici (l'élément reste installé, sans être republié).
+   */
+  private forgetWhatTheyForgot(group: GroupState, theirVersions: Record<string, string>, theirHorizon: number | undefined): void {
+    if (!theirHorizon) return;
+    for (const [key, entry] of Object.entries(group.entries)) {
+      if (key === SCOPE_KEY || theirVersions[key] !== undefined || entry.t > theirHorizon) continue;
+      delete group.entries[key];
+      this.deps.log(`${key} : supprimé ailleurs depuis longtemps, oublié de la réplique (reste installé ici)`);
+    }
+  }
+
   private absorb(
     group: GroupState,
     from: { from: string; label: string; url: string; members: GroupState["members"]; reports?: GroupState["reports"] },
     entries: Entries,
   ): string[] {
+    entries = this.admissible(group, entries);
     this.clock.observe(maxTime(entries));
     const changed = mergeEntries(group.entries, entries);
     mergeMembers(group.members, from.members);
@@ -355,6 +391,7 @@ export class Engine {
       changed = this.absorb(group, request, request.entries);
     } else {
       this.absorb(group, request, {});
+      this.forgetWhatTheyForgot(group, request.versions, request.forgottenBefore);
     }
     const response: SyncResponse = {
       ...this.identity(group),
@@ -387,6 +424,7 @@ export class Engine {
           status.nodeId = pulled.from;
           if (pulled.from === this.nodeId) return;
           this.absorb(group, pulled, pulled.entries);
+          this.forgetWhatTheyForgot(group, pulled.versions, pulled.forgottenBefore);
           const toPush = this.newerThan(group.entries, pulled.versions);
           if (Object.keys(toPush).length > 0) await this.deps.send(url, keys, { type: "push", ...this.identity(group), entries: toPush });
           status.lastOkAt = this.clock.now();
@@ -454,7 +492,7 @@ export class Engine {
       // Ce que l'application vient de changer ici repart aussitôt (et les réponses des membres aussi).
       await this.withSystemLock(() => this.scan(group));
       const now = this.clock.now();
-      pruneTombstones(group.entries, now);
+      group.forgottenBefore = Math.max(group.forgottenBefore, pruneTombstones(group.entries, now));
       pruneMembers(group.members, now, this.nodeId);
       for (const nodeId of Object.keys(group.reports)) if (!group.members[nodeId]) delete group.reports[nodeId];
       this.refreshReport(group);

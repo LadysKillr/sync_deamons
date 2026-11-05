@@ -274,6 +274,46 @@ describe("éléments incertains ou ignorés", () => {
   });
 });
 
+describe("longue absence", () => {
+  it("une machine revenue après 40 jours ne réinstalle pas ce que le groupe a supprimé", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const x = `${KEY_PREFIX.plugin}ancien`;
+    const y = `${KEY_PREFIX.plugin}nouveau`;
+    a.memory.state.set(x, plugin("1"));
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.has(x)).toBe(true);
+
+    // B s'éteint. A supprime X, installe Y, et 40 jours passent : la trace de suppression de X est oubliée.
+    network.delete(b.url);
+    a.memory.state.delete(x);
+    a.memory.state.set(y, plugin("2"));
+    await rounds([a], id, 1);
+    wall += 40 * 24 * 3600 * 1000;
+    await rounds([a], id, 1);
+    expect(a.engine.store.group(id)!.entries[x]).toBeUndefined();
+
+    // B revient avec sa vieille réplique.
+    network.set(b.url, b);
+    await rounds([b, a], id, 3);
+    expect(a.memory.state.has(x)).toBe(false);
+    expect(a.engine.store.group(id)!.entries[x]).toBeUndefined();
+    expect(b.memory.state.get(y)).toEqual(plugin("2"));
+    // X reste sur B (on ne sait plus s'il a été supprimé), sans être republié, et sort de sa réplique.
+    expect(b.memory.state.has(x)).toBe(true);
+    expect(b.engine.store.group(id)!.entries[x]).toBeUndefined();
+    expect(b.engine.view(b.engine.store.group(id)!).machines.every((machine) => machine.upToDate)).toBe(true);
+
+    // Ensuite, B redevient une machine normale : ses changements repartent.
+    b.memory.state.set(`${KEY_PREFIX.plugin}apres`, plugin("3"));
+    await rounds([b, a], id, 2);
+    expect(a.memory.state.get(`${KEY_PREFIX.plugin}apres`)).toEqual(plugin("3"));
+  });
+});
+
 describe("état par machine", () => {
   it("chaque machine voit ce qui est appliqué ou en échec chez les autres", async () => {
     const network = new Map<string, Node>();

@@ -45,6 +45,8 @@ export const GroupStateSchema = z.object({
   createdAt: z.number(),
   /** Vrai tant qu'une machine qui a rejoint n'a pas encore fait son premier échange réussi. */
   joining: z.boolean(),
+  /** Heure de la plus récente trace de suppression oubliée ici : horizon d'oubli (voir Engine.admissible). */
+  forgottenBefore: z.number().default(0),
   entries: z.record(z.string(), EntrySchema),
   /** Empreinte de la valeur locale au dernier accord avec la réplique. */
   baseline: z.record(z.string(), z.string()),
@@ -142,6 +144,7 @@ export function newGroupState(input: {
     peers: input.peers,
     createdAt: input.now,
     joining: input.peers.length > 0,
+    forgottenBefore: 0,
     entries: {},
     baseline: {},
     attempts: {},
