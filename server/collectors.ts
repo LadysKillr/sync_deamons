@@ -392,6 +392,14 @@ export class ConfigCollector implements Collector {
 
 export const FILE_LIMITS = { perFile: 4 * 1024 * 1024, perSet: 64 * 1024 * 1024, filesPerSet: 5000 } as const;
 const SKIPPED_NAMES = new Set([".git", "node_modules", ".DS_Store", "__pycache__"]);
+/**
+ * Fichiers en cours d'écriture (les nôtres, `*.sync-<pid>.tmp`, ou ceux d'un programme qui écrit un temporaire puis le
+ * renomme) : jamais relevés, comme la surveillance les ignore déjà (`IGNORED` dans watcher.ts).
+ */
+export const TEMPORARY_NAME = /(\.tmp$|\.sync-|~$|\.swp$)/;
+
+/** Le fichier a disparu entre la liste du dossier et sa lecture (temporaire renommé, suppression) : on passe. */
+const vanished = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 
 export type FileValue = { b64: string; mode: number };
 
@@ -430,11 +438,24 @@ export class FilesCollector implements Collector {
       let total = 0;
       let count = 0;
       const visit = (absolute: string, relative: string) => {
-        const info = lstatSync(absolute);
+        let info: ReturnType<typeof lstatSync>;
+        try {
+          info = lstatSync(absolute);
+        } catch (error) {
+          if (vanished(error)) return;
+          throw error;
+        }
         if (info.isSymbolicLink()) return;
         if (info.isDirectory()) {
-          for (const name of readdirSync(absolute).sort()) {
-            if (SKIPPED_NAMES.has(name)) continue;
+          let names: string[];
+          try {
+            names = readdirSync(absolute).sort();
+          } catch (error) {
+            if (vanished(error)) return;
+            throw error;
+          }
+          for (const name of names) {
+            if (SKIPPED_NAMES.has(name) || TEMPORARY_NAME.test(name)) continue;
             visit(path.join(absolute, name), relative ? `${relative}/${name}` : name);
           }
           return;
@@ -444,9 +465,16 @@ export class FilesCollector implements Collector {
         if (total + info.size > FILE_LIMITS.perSet || count >= FILE_LIMITS.filesPerSet) {
           return this.log(`fichiers ${set.id} : limite atteinte, ${relative} ignoré`);
         }
+        let content: Buffer;
+        try {
+          content = readFileSync(absolute);
+        } catch (error) {
+          if (vanished(error)) return;
+          throw error;
+        }
         total += info.size;
         count += 1;
-        const value: FileValue = { b64: readFileSync(absolute).toString("base64"), mode: info.mode & 0o777 };
+        const value: FileValue = { b64: content.toString("base64"), mode: info.mode & 0o777 };
         // Un fichier seul (pas un dossier) a pour chemin relatif son propre nom.
         out.set(`${KEY_PREFIX.file}${set.id}/${relative || path.basename(root)}`, value);
       };
@@ -474,7 +502,9 @@ export class FilesCollector implements Collector {
           rmSync(target, { force: true });
         } else {
           const value = change.value as unknown as FileValue;
-          mkdirSync(path.dirname(target), { recursive: true });
+          // Un fichier privé (aucun droit pour le groupe ni les autres, ex. 0600) arrive dans des dossiers privés (0700).
+          const privateFile = (value.mode & 0o077) === 0;
+          mkdirSync(path.dirname(target), privateFile ? { recursive: true, mode: 0o700 } : { recursive: true });
           const temporary = `${target}.sync-${process.pid}.tmp`;
           writeFileSync(temporary, Buffer.from(value.b64, "base64"), { mode: value.mode & 0o777 });
           chmodSync(temporary, value.mode & 0o777);

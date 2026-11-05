@@ -52,6 +52,35 @@ describe("fichiers", () => {
     expect(safeRelative("a/../b")).toBe(false);
     expect(safeRelative("a/b.md")).toBe(true);
   });
+
+  it("ne relève jamais un fichier en cours d'écriture (temporaire puis renommage)", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "psync-home-d-"));
+    const dir = path.join(home, "partage");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "0000000000000001.json"), "{}", { mode: 0o600 });
+    for (const name of [".0000000000000001.4242.tmp", "a.json.sync-99.tmp", "notes.md~", ".notes.md.swp"]) writeFileSync(path.join(dir, name), "x");
+    const collector = new FilesCollector(() => undefined, home);
+    const snapshot = await collector.snapshot({ ...DEFAULT_SCOPE, files: { enabled: true, sets: [{ id: "partage", path: "~/partage" }] } });
+    expect([...snapshot.keys()]).toEqual(["file/partage/0000000000000001.json"]);
+  });
+
+  it("un fichier privé (0600) arrive dans des dossiers créés en 0700 ; un fichier ordinaire garde les droits par défaut", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "psync-home-e-"));
+    const sets = [
+      { id: "prive", path: "~/.paseo/plugin-data/relais/spend" },
+      { id: "public", path: "~/notes" },
+    ];
+    const collector = new FilesCollector(() => undefined, home);
+    await collector.snapshot({ ...DEFAULT_SCOPE, files: { enabled: true, sets } });
+    const outcomes = await collector.apply([
+      { key: "file/prive/0000000000000002.json", value: { b64: Buffer.from("{}").toString("base64"), mode: 0o600 } },
+      { key: "file/public/a/b.md", value: { b64: Buffer.from("# b").toString("base64"), mode: 0o644 } },
+    ]);
+    expect(outcomes.every((outcome) => outcome.error === null)).toBe(true);
+    expect(statSync(path.join(home, ".paseo/plugin-data/relais/spend")).mode & 0o777).toBe(0o700);
+    expect(statSync(path.join(home, ".paseo/plugin-data/relais/spend/0000000000000002.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(path.join(home, "notes/a")).mode & 0o077).not.toBe(0);
+  });
 });
 
 import { mergeMembers, pruneMembers } from "../server/replica";
