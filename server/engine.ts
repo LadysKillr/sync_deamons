@@ -23,6 +23,7 @@ import {
   concurrent,
 } from "./replica";
 import { SYNC_VERSION } from "../shared/version";
+import { updateLeader } from "./plugin-updates";
 import type { GroupState, Store } from "./store";
 import type { SyncRequest, SyncResponse } from "./transport";
 
@@ -127,6 +128,24 @@ export class Engine {
 
   private owned(group: GroupState, key: string): boolean {
     return key === SCOPE_KEY || this.ownerOf(key) === group.id;
+  }
+
+  /** Travail qui touche le daemon (mise à jour de plugins) : jamais en même temps qu'un relevé ou une application. */
+  exclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.withSystemLock(async () => {
+      this.applying += 1;
+      try {
+        return await work();
+      } finally {
+        this.applying -= 1;
+        this.quietUntil = Date.now() + 4000;
+      }
+    });
+  }
+
+  /** Cette machine gère-t-elle la clé dans ce groupe (premier groupe qui la couvre) ? */
+  owns(group: GroupState, key: string): boolean {
+    return this.owned(group, key);
   }
 
   private withSystemLock<T>(work: () => Promise<T>): Promise<T> {
@@ -736,6 +755,15 @@ export class Engine {
       approval: group.approval,
       awaiting,
       rejected: Object.keys(group.rejected),
+      updates: {
+        leader: (() => {
+          const leader = updateLeader(group, this.nodeId, this.clock.now());
+          return leader ? labelOf(leader) : null;
+        })(),
+        lastCheckAt: group.lastUpdateCheckAt,
+        lastCheckError: group.lastUpdateCheckError,
+        log: group.updateLog.slice(0, 10),
+      },
       conflicts: this.allConflicts(group).map((conflict) => ({
         key: conflict.key,
         at: conflict.at,

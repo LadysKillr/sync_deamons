@@ -99,6 +99,14 @@ export const GroupViewSchema = z.object({
   ),
   /** Clés dont la version actuelle a été refusée ici. */
   rejected: z.array(z.string()),
+  /** Suivi des mises à jour des plugins (option du groupe). */
+  updates: z.object({
+    /** Machine qui vérifie et installe les mises à jour pour le groupe. */
+    leader: z.string().nullable(),
+    lastCheckAt: z.number().nullable(),
+    lastCheckError: z.string().nullable(),
+    log: z.array(z.object({ id: z.string(), from: z.string().nullable(), to: z.string().nullable(), at: z.number(), error: z.string().nullable() })),
+  }),
   /** Conflits récents (7 jours). */
   conflicts: z.array(
     z.object({
@@ -237,3 +245,6 @@ export const restoreRpc = defineRpc({
   input: z.object({ id: z.string(), key: z.string(), hash: z.string() }),
   output: z.object({ ok: z.literal(true) }),
 });
+
+/** Vérifie tout de suite les mises à jour des plugins (si cette machine mène pour au moins un groupe). */
+export const checkUpdatesRpc = defineRpc({ name: "sync.updates.check", input: z.object({}), output: z.object({ ok: z.literal(true) }) });

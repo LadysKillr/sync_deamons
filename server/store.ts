@@ -65,6 +65,12 @@ export const GroupStateSchema = z.object({
       }),
     )
     .default([]),
+  /** Suivi des mises à jour des plugins : dernière vérification menée ici, et ce qui a été installé. */
+  lastUpdateCheckAt: z.number().nullable().default(null),
+  lastUpdateCheckError: z.string().nullable().default(null),
+  updateLog: z
+    .array(z.object({ id: z.string(), from: z.string().nullable(), to: z.string().nullable(), at: z.number(), error: z.string().nullable() }))
+    .default([]),
   /** Heure de la plus récente trace de suppression oubliée ici : horizon d'oubli (voir Engine.admissible). */
   forgottenBefore: z.number().default(0),
   entries: z.record(z.string(), EntrySchema),
@@ -167,6 +173,9 @@ export function newGroupState(input: {
     forgottenBefore: 0,
     history: {},
     conflicts: [],
+    lastUpdateCheckAt: null,
+    lastUpdateCheckError: null,
+    updateLog: [],
     exclude: [],
     approval: false,
     approved: {},

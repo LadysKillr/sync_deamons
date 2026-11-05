@@ -6,6 +6,7 @@ import type { input as ZodInput, output as ZodOutput, ZodType } from "zod";
 import { DEFAULT_SCOPE } from "./shared/model";
 import {
   InviteSchema,
+  checkUpdatesRpc,
   decideRpc,
   groupCreateRpc,
   groupRemoveRpc,
@@ -25,6 +26,7 @@ import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollec
 import { deriveMasterKey, groupKeys, normalizeGroupName } from "./server/crypto";
 import { Engine } from "./server/engine";
 import { SelfCollector } from "./server/self-update";
+import { CHECK_EVERY_MS, PluginUpdater, updateLeader, updatesFor } from "./server/plugin-updates";
 import { Store, newGroupState } from "./server/store";
 import { ChangeWatcher, watchTargets } from "./server/watcher";
 import { expandHome } from "./server/collectors";
@@ -225,6 +227,42 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     }
   });
 
+  // Suivi des mises à jour des plugins : seule la machine meneuse de chaque groupe vérifie et installe.
+  const updater = new PluginUpdater(cli, log);
+  let checkingUpdates = false;
+  async function checkPluginUpdates(force = false): Promise<void> {
+    if (checkingUpdates) return;
+    checkingUpdates = true;
+    try {
+      const now = Date.now();
+      for (const group of store.data.groups) {
+        const scope = engine.scopeOf(group);
+        if (!group.enabled || !scope.autoUpdatePlugins) continue;
+        if (updateLeader(group, store.data.node.nodeId, now) !== store.data.node.nodeId) continue;
+        if (!force && group.lastUpdateCheckAt !== null && now - group.lastUpdateCheckAt < CHECK_EVERY_MS) continue;
+        group.lastUpdateCheckAt = now;
+        try {
+          const updates = updatesFor(group, scope, await updater.check(now), (key) => engine.owns(group, key));
+          group.lastUpdateCheckError = null;
+          if (updates.length > 0 && (await engine.exclusive(() => updater.apply(group, updates, now))) > 0) void engine.run(group.id);
+        } catch (error) {
+          group.lastUpdateCheckError = describe(error);
+          log(`groupe ${group.name} : ${group.lastUpdateCheckError}`);
+        }
+        store.save();
+      }
+    } finally {
+      checkingUpdates = false;
+    }
+  }
+  const updateTimer = setInterval(() => void checkPluginUpdates(), 15 * 60_000);
+  const firstUpdateCheck = setTimeout(() => void checkPluginUpdates(), 90_000);
+
+  handle(checkUpdatesRpc, async () => {
+    await checkPluginUpdates(true);
+    return { ok: true as const };
+  });
+
   // Passages réguliers ; chaque groupe a son propre passage, un seul à la fois.
   let timer: ReturnType<typeof setInterval> | null = null;
   function restartTimer() {
@@ -245,6 +283,8 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
 
   return async () => {
     clearTimeout(first);
+    clearTimeout(firstUpdateCheck);
+    clearInterval(updateTimer);
     if (timer) clearInterval(timer);
     engine.stop();
     watcher.close();
