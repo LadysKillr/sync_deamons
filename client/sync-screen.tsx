@@ -11,6 +11,7 @@ import {
   nodeUpdateRpc,
   pluginsListRpc,
   statusRpc,
+  retryRpc,
   syncNowRpc,
   type GroupView,
   type LocalPlugin,
@@ -191,6 +192,7 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
   const update = useRpc(groupUpdateRpc);
   const remove = useRpc(groupRemoveRpc);
   const syncNow = useRpc(syncNowRpc);
+  const retry = useRpc(retryRpc);
   const invite = useRpc(inviteRpc);
   const [panel, setPanel] = useState<"none" | "scope" | "peers" | "invite" | "local" | "password">("none");
   const closeAndRefresh = () => (setPanel("none"), onChanged());
@@ -246,10 +248,19 @@ function GroupCard(props: { s: Styles; group: GroupView; index: number; count: n
         <View style={{ gap: 2 }}>
           <Text style={s.danger}>Problèmes ici :</Text>
           {group.problems.map((problem) => (
-            <Text key={problem.key} style={s.danger}>
-              {problem.key} : {problem.error}
-            </Text>
+            <View key={problem.key} style={s.row}>
+              <Text style={s.danger}>
+                {problem.key} : {problem.error}
+              </Text>
+              <Button s={s} label="Réessayer" disabled={action.busy} onPress={() => action.run(() => retry({ id: group.id, key: problem.key }))} />
+            </View>
           ))}
+          {group.problems.length > 1 ? (
+            <Button s={s} label="Tout réessayer" disabled={action.busy} onPress={() => action.run(() => retry({ id: group.id }))} />
+          ) : null}
+          <Text style={s.muted}>
+            Pour un plugin qui échoue toujours sur cette machine (par exemple bloqué par l'antivirus), excluez-le ici : « Cette machine ».
+          </Text>
         </View>
       ) : null}
 

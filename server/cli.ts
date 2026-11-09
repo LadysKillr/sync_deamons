@@ -65,10 +65,30 @@ export function cliError(result: CliResult): string {
   return text || `code ${result.code}`;
 }
 
+/**
+ * Le daemon n'est pas (encore) joignable : il démarre, charge ses plugins, ou redémarre. Ce n'est pas un échec de
+ * synchronisation : le passage est simplement refait un peu plus tard, sans erreur affichée.
+ */
+export class DaemonNotReady extends Error {
+  override name = "DaemonNotReady";
+}
+
+const NOT_READY = /paseo daemon start|cannot connect to daemon|ECONNREFUSED|daemon (?:is )?not (?:running|ready)|daemon is starting/i;
+
+export function isDaemonNotReady(error: unknown): boolean {
+  if (error instanceof DaemonNotReady) return true;
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  return NOT_READY.test(text);
+}
+
 /** Lance la commande et rend son JSON ; lève avec un message lisible si elle échoue. */
 export async function runJson(cli: PaseoCli, args: string[]): Promise<unknown> {
   const result = await cli.run([...args, "--json"]);
-  if (result.code !== 0) throw new Error(`paseo ${args.slice(0, 3).join(" ")} : ${cliError(result)}`);
+  if (result.code !== 0) {
+    const message = `paseo ${args.slice(0, 3).join(" ")} : ${cliError(result)}`;
+    if (NOT_READY.test(`${message}\n${result.stderr}`)) throw new DaemonNotReady(message);
+    throw new Error(message);
+  }
   const parsed = parseJsonOutput(result.stdout);
   if (Array.isArray(parsed)) {
     const failed = parsed.find((item: { outcome?: string; error?: string }) => item?.outcome === "error" || item?.error);

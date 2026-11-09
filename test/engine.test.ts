@@ -6,6 +6,7 @@ import { DEFAULT_SCOPE, KEY_PREFIX, keyInScope, type GroupScope } from "../share
 import type { ApplyOutcome, Change, Collector } from "../server/collectors";
 import { aad, deriveMasterKey, groupKeys, open, seal, type GroupKeys } from "../server/crypto";
 import { Engine, type EngineDeps } from "../server/engine";
+import { DaemonNotReady, isDaemonNotReady } from "../server/cli";
 import { BlobStore } from "../server/blobs";
 import { FilesCollector } from "../server/collectors";
 import { SELF_UPDATE_DELAY_MS, SelfCollector } from "../server/self-update";
@@ -18,6 +19,11 @@ class MemoryCollector implements Collector {
   readonly name = "memory";
   state = new Map<string, Json>();
   failNext = new Set<string>();
+  /** Échoue à chaque fois (installation refusée par la machine). */
+  alwaysFail = new Set<string>();
+  /** Daemon en train de démarrer : chaque lecture échoue comme le CLI à ce moment-là. */
+  notReady = false;
+  applyCalls = 0;
   unsure = new Set<string>();
   temporary = new Set<string>();
   /** Clés gérées par un vrai collecteur placé à côté : pas par celui-ci. */
@@ -32,11 +38,13 @@ class MemoryCollector implements Collector {
     return this.temporary.has(key);
   }
   async snapshot(scope: GroupScope): Promise<Map<string, Json>> {
+    if (this.notReady) throw new DaemonNotReady("paseo plugin ls : Start with: paseo daemon start");
     return new Map([...this.state].filter(([key]) => keyInScope(scope, key) && this.owns(key)));
   }
   async apply(changes: Change[]): Promise<ApplyOutcome[]> {
     return changes.map(({ key, value }) => {
-      if (this.failNext.delete(key)) return { key, error: "échec simulé" };
+      this.applyCalls += 1;
+      if (this.failNext.delete(key) || this.alwaysFail.has(key)) return { key, error: "échec simulé" };
       if (value === null) this.state.delete(key);
       else this.state.set(key, value);
       return { key, error: null };
@@ -595,6 +603,65 @@ describe("changement de mot de passe et retrait", () => {
     await rounds([c], oldId, 1);
     expect(c.engine.store.group(oldId)!.enabled).toBe(false);
     expect(c.memory.state.has(key)).toBe(false);
+  });
+});
+
+describe("démarrage et échecs répétés", () => {
+  it("un daemon pas encore prêt n'est ni une erreur ni un problème, et le passage suivant marche", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}kanban`;
+    a.memory.state.set(key, plugin("1"));
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    const gb = b.engine.store.group(id)!;
+
+    b.memory.notReady = true;
+    await rounds([b], id, 1);
+    expect(gb.lastError).toBeNull();
+    expect(b.engine.view(gb).problems).toEqual([]);
+
+    b.memory.notReady = false;
+    a.memory.state.set(key, plugin("2"));
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("2"));
+    a.engine.stop();
+    b.engine.stop();
+  });
+
+  it("arrête de relancer après 5 échecs à la même version, jusqu'à « Réessayer »", async () => {
+    const network = new Map<string, Node>();
+    const a = makeNode("a", network);
+    const b = makeNode("b", network);
+    const key = `${KEY_PREFIX.plugin}paseo-canvas`;
+    const id = await addGroup(a, [], { create: true });
+    await addGroup(b, [a.url], { create: false });
+    await rounds([a, b], id, 2);
+    const gb = b.engine.store.group(id)!;
+    b.memory.alwaysFail.add(key);
+    a.memory.state.set(key, plugin("1"));
+    await rounds([a], id, 1);
+
+    // Chaque « démarrage » plusieurs heures plus tard : le délai d'attente est passé, la machine réessaie… 5 fois.
+    for (let i = 0; i < 8; i += 1) {
+      wall += 6 * 3600 * 1000;
+      await rounds([b], id, 1);
+    }
+    expect(b.memory.applyCalls).toBe(5);
+    expect(b.engine.view(gb).problems[0]!.error).toMatch(/abandonné après 5 essais/);
+
+    // « Réessayer » relance une fois ; une nouvelle version aussi.
+    expect(b.engine.retry(gb, key)).toBe(1);
+    await rounds([b], id, 1);
+    expect(b.memory.applyCalls).toBe(6);
+    b.memory.alwaysFail.delete(key);
+    a.memory.state.set(key, plugin("2"));
+    wall += 6 * 3600 * 1000;
+    await rounds([a, b], id, 2);
+    expect(b.memory.state.get(key)).toEqual(plugin("2"));
+    expect(b.engine.view(gb).problems).toEqual([]);
   });
 });
 

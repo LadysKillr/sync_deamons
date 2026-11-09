@@ -140,3 +140,14 @@ describe("version", () => {
     expect(compareVersions("0.3.1", "0.3.0")).toBeGreaterThan(0);
   });
 });
+
+import { isDaemonNotReady as notReady } from "../server/cli";
+
+describe("daemon pas prêt", () => {
+  it("reconnaît les messages du CLI quand le daemon démarre, et seulement ceux-là", () => {
+    expect(notReady(new Error("paseo plugin ls : Daemon is not running. Start with: paseo daemon start"))).toBe(true);
+    expect(notReady("paseo plugin install : connect ECONNREFUSED 127.0.0.1:6767")).toBe(true);
+    expect(notReady(new Error("paseo plugin install : npm ci failed: EPERM: operation not permitted"))).toBe(false);
+    expect(notReady(new Error("plugin is not running"))).toBe(false);
+  });
+});

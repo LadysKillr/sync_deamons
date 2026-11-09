@@ -262,3 +262,10 @@ export const rekeyRpc = defineRpc({
   input: z.object({ id: z.string(), password: z.string().min(8, "8 caractères au moins"), remove: z.array(z.string()).default([]) }),
   output: z.object({ id: z.string(), reached: z.number(), unreachable: z.array(z.string()) }),
 });
+
+/** Relance les éléments en échec (un seul, ou tous) : utile après un abandon au bout de plusieurs essais. */
+export const retryRpc = defineRpc({
+  name: "sync.item.retry",
+  input: z.object({ id: z.string(), key: z.string().optional() }),
+  output: z.object({ count: z.number() }),
+});

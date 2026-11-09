@@ -1,6 +1,7 @@
 import { DEFAULT_SCOPE, GroupScopeSchema, KEY_PREFIX, SCOPE_KEY, keyInScope, matchesExclusion, type GroupScope } from "../shared/model";
 import type { GroupView, StatusView } from "../shared/rpc";
 import type { Collector } from "./collectors";
+import { isDaemonNotReady } from "./cli";
 import { canonical, groupKeys, hashValue, type GroupKeys } from "./crypto";
 import {
   HISTORY_DEPTH,
@@ -76,6 +77,11 @@ function parseVersion(version: string): Pick<Entry, "t" | "o" | "h"> | null {
 }
 
 /** Attente avant de réessayer une application ratée : 30 s, 1 min, 2 min… jusqu'à 1 h. */
+/** Au-delà, un élément qui échoue toujours à la même version n'est plus réessayé seul : bouton « Réessayer ». */
+export const MAX_ATTEMPTS = 5;
+/** Daemon pas encore prêt (démarrage) : nouvel essai du passage après ce délai. */
+export const NOT_READY_RETRY_MS = 15_000;
+
 export function backoffMs(count: number): number {
   return Math.min(30_000 * 2 ** Math.max(0, count - 1), 3600_000);
 }
@@ -358,6 +364,9 @@ export class Engine {
       if (group.approval && group.approved[key] !== entry.h) continue;
       const attempt = group.attempts[key];
       if (attempt && attempt.h === entry.h && now - attempt.at < backoffMs(attempt.count)) continue;
+      // Toujours en échec après MAX_ATTEMPTS essais (par exemple une installation que la machine refuse à chaque
+      // démarrage) : on arrête de relancer, jusqu'à une nouvelle version ou un « Réessayer ».
+      if (attempt && attempt.h === entry.h && attempt.error && attempt.count >= MAX_ATTEMPTS) continue;
       wanted.set(key, { ...entry });
     }
     if (wanted.size === 0) return;
@@ -393,6 +402,11 @@ export class Engine {
           continue;
         }
         let error = errors.get(key) ?? null;
+        if (error !== null && isDaemonNotReady(error)) {
+          // Le daemon redémarrait : rien n'a été fait, la référence locale ne bouge pas, le passage sera refait.
+          this.notReady = true;
+          continue;
+        }
         if (!after.has(key) && collector.uncertain?.(key)) {
           // État illisible juste après l'écriture : la référence ne bouge pas, on réessaiera plus tard.
           const previous = group.attempts[key];
@@ -411,7 +425,8 @@ export class Engine {
         } else {
           const previous = group.attempts[key];
           const count = previous && previous.h === entry.h ? previous.count + 1 : 1;
-          const message = error ?? "l'état obtenu diffère de celui du groupe";
+          let message = error ?? "l'état obtenu diffère de celui du groupe";
+          if (count >= MAX_ATTEMPTS) message = `${message} (abandonné après ${MAX_ATTEMPTS} essais : « Réessayer » pour relancer)`;
           group.attempts[key] = { h: entry.h, at: this.clock.now(), error: message, count };
           this.deps.log(`${key} : ${message}`);
         }
@@ -900,12 +915,35 @@ export class Engine {
       group.lastSyncAt = now;
       group.lastError = this.targets(group).length === 0 ? "aucune autre machine connue" : null;
     } catch (error) {
-      group.lastError = describe(error);
-      this.deps.log(`groupe ${group.name} : ${group.lastError}`);
+      if (isDaemonNotReady(error)) {
+        this.notReady = true;
+      } else {
+        group.lastError = describe(error);
+        this.deps.log(`groupe ${group.name} : ${group.lastError}`);
+      }
     } finally {
       this.store.save();
       this.deps.afterPass?.();
+      if (this.notReady) {
+        // Daemon en train de démarrer : on repasse dans 15 s, sans rien signaler (dit une seule fois dans le journal).
+        this.notReady = false;
+        if (!this.waitingForDaemon) this.deps.log(`daemon pas encore prêt, nouvel essai dans ${NOT_READY_RETRY_MS / 1000} s`);
+        this.waitingForDaemon = true;
+        this.trigger(groupId, NOT_READY_RETRY_MS);
+      } else {
+        this.waitingForDaemon = false;
+      }
     }
+  }
+
+  private notReady = false;
+  private waitingForDaemon = false;
+
+  /** « Réessayer » : oublie les échecs (d'un élément, ou de tous) pour que le prochain passage les relance. */
+  retry(group: GroupState, key?: string): number {
+    const keys = key ? [key] : Object.keys(group.attempts).filter((item) => group.attempts[item]?.error);
+    for (const item of keys) delete group.attempts[item];
+    return keys.length;
   }
 
   view(group: GroupState): GroupView {

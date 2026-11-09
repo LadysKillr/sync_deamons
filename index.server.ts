@@ -18,11 +18,12 @@ import {
   pluginsListRpc,
   rekeyRpc,
   restoreRpc,
+  retryRpc,
   statusRpc,
   syncNowRpc,
   type NodeView,
 } from "./shared/rpc";
-import { createPaseoCli } from "./server/cli";
+import { createPaseoCli, isDaemonNotReady } from "./server/cli";
 import { ConfigCollector, FilesCollector, PluginSettingsCollector, PluginsCollector } from "./server/collectors";
 import { JsonKeysCollector, SchedulesCollector } from "./server/collectors-extra";
 import { BlobStore } from "./server/blobs";
@@ -234,6 +235,14 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
     return { id: group.id, reached, unreachable };
   });
 
+  handle(retryRpc, async ({ id, key }) => {
+    const group = requireGroup(id);
+    const count = engine.retry(group, key);
+    store.save();
+    void engine.run(group.id);
+    return { count };
+  });
+
   handle(groupRemoveRpc, async ({ id }) => {
     store.data.groups = store.data.groups.filter((group) => group.id !== id);
     store.save();
@@ -284,8 +293,13 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
           group.lastUpdateCheckError = null;
           if (updates.length > 0 && (await engine.exclusive(() => updater.apply(group, updates, now))) > 0) void engine.run(group.id);
         } catch (error) {
-          group.lastUpdateCheckError = describe(error);
-          log(`groupe ${group.name} : ${group.lastUpdateCheckError}`);
+          if (isDaemonNotReady(error)) {
+            // Daemon en démarrage : vérification refaite au prochain tour, sans erreur affichée.
+            group.lastUpdateCheckAt = null;
+          } else {
+            group.lastUpdateCheckError = describe(error);
+            log(`groupe ${group.name} : ${group.lastUpdateCheckError}`);
+          }
         }
         store.save();
       }
@@ -316,13 +330,30 @@ export function createSyncServer(server: PluginServerContext, options: SyncServe
   }
   restartTimer();
   // Premier passage peu après le démarrage, le temps que le daemon finisse de charger les plugins.
-  const first = setTimeout(() => {
+  // Premier passage quand le daemon répond : au démarrage de Paseo, il charge encore ses plugins (parfois une minute)
+  // et le CLI dit alors « Start with: paseo daemon start ». On l'interroge toutes les 5 s, 5 min au plus.
+  let first: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  const startedAt = Date.now();
+  async function firstPass(): Promise<void> {
+    first = null;
+    if (stopped) return;
+    try {
+      await plugins.list();
+    } catch (error) {
+      if (isDaemonNotReady(error) && Date.now() - startedAt < 5 * 60_000) {
+        first = setTimeout(() => void firstPass(), 5000);
+        return;
+      }
+    }
     rewatch();
     runAll();
-  }, 5000);
+  }
+  first = setTimeout(() => void firstPass(), 5000);
 
   return async () => {
-    clearTimeout(first);
+    stopped = true;
+    if (first) clearTimeout(first);
     clearTimeout(firstUpdateCheck);
     clearInterval(updateTimer);
     if (timer) clearInterval(timer);
